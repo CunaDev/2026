@@ -68,7 +68,7 @@ getgenv().loaded = true
 
 -- Library init
     getgenv().library = {
-        directory = "priv9",
+        directory = "Exyis",
         folders = {
             "/fonts",
             "/configs",
@@ -88,12 +88,12 @@ getgenv().loaded = true
     
     local themes = {
         preset = {
-            outline = rgb(5, 5, 5),
-            inline = rgb(18, 18, 18),
-            text = rgb(220, 220, 220),
+            outline = rgb(12, 12, 12),
+            inline = rgb(30, 30, 30),
+            text = rgb(200, 200, 200),
             text_outline = rgb(0, 0, 0),
-            background = rgb(8, 8, 8),
-            accent = hex("#1E6B8A"),
+            background = rgb(15, 15, 15),
+            accent = rgb(90, 90, 90),
         },
 
         utility = {
@@ -886,7 +886,7 @@ getgenv().loaded = true
             return setmetatable(cfg, library)
         end 
 
-        local watermark = library:watermark({name = "priv9 - 100 fps - 100 ping"})
+        local watermark = library:watermark({name = "Exyis - 100 fps - 100 ping"})
         local fps = 0
         local watermark_delay = tick() 
 
@@ -896,7 +896,7 @@ getgenv().loaded = true
             if tick() - watermark_delay > 1 then 
                 watermark_delay = tick()
                 local ping = math.floor(stats.PerformanceStats.Ping:GetValue()) .. "ms"                
-                watermark.update_text(string.format("priv9 - fps: %s - ping: %s", fps, ping))
+                watermark.update_text(string.format("Exyis - fps: %s - ping: %s", fps, ping))
                 fps = 0
             end
         end)
