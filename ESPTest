@@ -21,6 +21,9 @@ local ESP = {
    BoxThickness = 1,
    TracerThickness = 1,
    HealthBarPosition = "Left",
+   HealthBarThickness = 3,
+   TracerOrigin = "Bottom",
+   TracerFollowMouse = false,
 }
 
 local espCache = {}
@@ -110,7 +113,8 @@ local function updateEsp(player, esp)
    end
 
    local dist = (root.Position - camera.CFrame.Position).Magnitude
-   if dist > ESP.MaxDistance then
+   local maxDist = ESP.MaxDistance or 500
+   if dist > maxDist then
       esp.box.Visible = false
       esp.boxoutline.Visible = false
       esp.tracer.Visible = false
@@ -131,8 +135,8 @@ local function updateEsp(player, esp)
    esp.tracer.Thickness = ESP.TracerThickness
    esp.traceroutline.Thickness = ESP.TracerThickness + 2
 
-   if cframe and visible then
-      local scaleFactor = 1 / (depth * tan(rad(camera.FieldOfView / 2)) * 2) * 1000
+   if cframe and visible and depth then
+      local scaleFactor = 1 / (math.abs(depth) * tan(rad(camera.FieldOfView / 2)) * 2) * 1000
       local width, height = 4 * scaleFactor, 5 * scaleFactor
       local x, y = position.X, position.Y
 
