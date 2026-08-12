@@ -1,17 +1,19 @@
 local SpeedBypass = {}
 
+-- ------------------------------------------------------------------
+-- 내부 상태
+-- ------------------------------------------------------------------
 local State = {
 	Enabled           = false,   -- 마스터 토글
-	CurrentSpeed      = 16,      -- 활성화 시 목표 WalkSpeed
-	Seat              = nil,     -- 투명 의자 인스턴스
-	SeatWeld          = nil,     -- 의자를 캐릭터 루트에 고정하는 용접
+	CurrentSpeed      = 16,      -- 활성화 시 목표 속도 (VehicleSeat MaxSpeed)
+	Seat              = nil,     -- 투명 VehicleSeat 인스턴스
 	Character         = nil,     -- 현재(로컬) 캐릭터
 	Humanoid          = nil,     -- 현재 휴머노이드
 	ConnCharacterAdded = nil,    -- CharacterAdded 연결
 	ConnHeartbeat       = nil,    -- Heartbeat 연결
 }
 
-local SPEED_MIN   = 16
+local SPEED_MIN   = 0
 local SPEED_MAX   = 500
 
 local Players     = game:GetService("Players")
@@ -36,28 +38,21 @@ local function Clamp(value, min, max)
 end
 
 -- ------------------------------------------------------------------
--- 의자 생성
+-- VehicleSeat 생성
 -- ------------------------------------------------------------------
 local function CreateSeat(parent)
-	local seat = Instance.new("Seat")
+	local seat = Instance.new("VehicleSeat")
 	seat.Name = "SpeedBypassSeat"
 	seat.Transparency = 1
 	seat.Size = Vector3.new(2, 0.2, 2)
 	seat.Anchored = false
 	seat.CanCollide = false
 	seat.CanTouch = false
+	seat.MaxSpeed = State.CurrentSpeed
+	seat.Throttle = 1    -- 자동 전진
+	seat.Steer = 0
 	seat.Parent = parent
 	return seat
-end
-
-local function WeldSeatToRoot(seat, root)
-	local weld = Instance.new("Weld")
-	weld.Name = "SpeedBypassWeld"
-	weld.Part0 = root
-	weld.Part1 = seat
-	weld.C0 = CFrame.new(0, -2, 1)   -- 캐릭터 아래/뒤쪽에 배치
-	weld.Parent = seat
-	return weld
 end
 
 local function RemoveSeat()
@@ -67,11 +62,10 @@ local function RemoveSeat()
 		end)
 	end
 	State.Seat = nil
-	State.SeatWeld = nil
 end
 
 -- ------------------------------------------------------------------
--- 적용: 의자 + 용접 생성 후 플레이어 앉히기
+-- 적용: VehicleSeat 생성 후 플레이어 앉히기
 -- ------------------------------------------------------------------
 local function ApplySeat()
 	local char   = State.Character
@@ -91,21 +85,21 @@ local function ApplySeat()
 
 	local seat = SafeCall(function()
 		local s = CreateSeat(char)
-		local w = WeldSeatToRoot(s, root)
-		s.CFrame = root.CFrame * CFrame.new(0, -2, 1)
-		return s, w
+		-- 캐릭터 발밑에 배치
+		s.CFrame = root.CFrame * CFrame.new(0, -3, 0)
+		return s
 	end)
 	if not seat then
 		return
 	end
 
 	State.Seat = seat
-	State.SeatWeld = seat:FindFirstChild("SpeedBypassWeld")
 
+	-- 앉히기: Sit=true 로 가장 가까운 Seat/VehicleSeat 탐색
 	SafeCall(function()
 		humanoid.Sit = true
-		task.wait(0.1)
-		humanoid.Sit = false
+		task.wait(0.15)
+		-- 이미 앉았으면 불필요한 Sit=false 는 생략
 	end)
 end
 
@@ -123,20 +117,24 @@ local function OnHeartbeat()
 		return
 	end
 
-	-- 의자가 사라졌으면 재생성
+	-- VehicleSeat 이 사라졌으면 재생성
 	if not State.Seat or not State.Seat.Parent then
 		SafeCall(ApplySeat)
 		return
 	end
 
-	-- 목표 속도 강제 적용
+	-- VehicleSeat MaxSpeed 업데이트 (WalkSpeed 는 건드리지 않음)
 	SafeCall(function()
-		-- 앉음(Seated) 상태로 남아있으면 WalkSpeed가 이동에 안 먹힘.
-		-- 걷기(Running) 상태로 강제 전환 후 속도 적용.
+		State.Seat.MaxSpeed = State.CurrentSpeed
+		State.Seat.Throttle = 1
+	end)
+
+	-- 클라이언트 측 HumanoidState 를 Running 으로 강제 전환
+	-- 서버는 여전히 Seated 로 봄 → 애니메이션만 걷는 걸로 보임
+	SafeCall(function()
 		if humanoid:GetState() == Enum.HumanoidStateType.Seated then
 			humanoid:ChangeState(Enum.HumanoidStateType.Running)
 		end
-		humanoid.WalkSpeed = State.CurrentSpeed
 	end)
 end
 
@@ -153,7 +151,7 @@ local function OnCharacterAdded(character)
 
 	if State.Enabled then
 		task.spawn(function()
-			task.wait(0.5)   -- 리그가 안정된 후 다시 앉히기
+			task.wait(0.8)   -- 리그가 안정된 후 다시 앉히기
 			if State.Enabled then
 				SafeCall(ApplySeat)
 			end
@@ -176,6 +174,7 @@ function SpeedBypass.Toggle(desired)
 		else
 			State.Enabled = false
 			RemoveSeat()
+			-- WalkSpeed 원복 (안전장치)
 			if State.Humanoid then
 				State.Humanoid.WalkSpeed = 16
 			end
@@ -192,6 +191,7 @@ end
 function SpeedBypass.SetSpeed(value)
 	local clamped = Clamp(value, SPEED_MIN, SPEED_MAX)
 	State.CurrentSpeed = clamped
+	-- Heartbeat 이 MaxSpeed 에 반영함
 	return clamped
 end
 
@@ -202,37 +202,6 @@ function SpeedBypass.GetStatus()
 		SeatActive     = State.Seat ~= nil and State.Seat.Parent ~= nil,
 		CharacterAlive = State.Character ~= nil and State.Character.Parent ~= nil,
 	}
-end
-
--- 선택적 ui-lib 연동. .update/.onChanged 또는 단순 게터를 갖는 요소를
--- 기대하며, 형태가 다르면 조용히 무시한다.
-function SpeedBypass.Bind(hub)
-	if not hub then
-		return
-	end
-	SafeCall(function()
-		-- 허브를 순회하며 "Speed" 토글 + "Speed value" 슬라이더를 찾는다
-		for _, tab in pairs(hub) do
-			for _, column in pairs(tab) do
-				for _, section in pairs(column) do
-					for _, element in pairs(section) do
-						local label = element.Name or element.Text or ""
-						if type(element) == "table" then
-							if label:match("^Speed") then
-								element:onChanged(function(value)
-									SpeedBypass.Toggle(value)
-								end)
-							elseif label:match("Speed value") then
-								element:onChanged(function(value)
-									SpeedBypass.SetSpeed(value)
-								end)
-							end
-						end
-					end
-				end
-			end
-		end
-	end)
 end
 
 function SpeedBypass.Destroy()
