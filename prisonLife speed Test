@@ -1,8 +1,5 @@
 local SpeedBypass = {}
 
--- ------------------------------------------------------------------
--- 내부 상태
--- ------------------------------------------------------------------
 local State = {
 	Enabled           = false,   -- 마스터 토글
 	CurrentSpeed      = 16,      -- 활성화 시 목표 WalkSpeed
@@ -14,8 +11,8 @@ local State = {
 	ConnHeartbeat       = nil,    -- Heartbeat 연결
 }
 
-local SPEED_MIN   = 0
-local SPEED_MAX   = 100
+local SPEED_MIN   = 16
+local SPEED_MAX   = 500
 
 local Players     = game:GetService("Players")
 local RunService  = game:GetService("RunService")
@@ -134,6 +131,11 @@ local function OnHeartbeat()
 
 	-- 목표 속도 강제 적용
 	SafeCall(function()
+		-- 앉음(Seated) 상태로 남아있으면 WalkSpeed가 이동에 안 먹힘.
+		-- 걷기(Running) 상태로 강제 전환 후 속도 적용.
+		if humanoid:GetState() == Enum.HumanoidStateType.Seated then
+			humanoid:ChangeState(Enum.HumanoidStateType.Running)
+		end
 		humanoid.WalkSpeed = State.CurrentSpeed
 	end)
 end
