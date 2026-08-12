@@ -1,199 +1,306 @@
--- Made by Blissful#4992
-local Players = game:service("Players")
-local Player = Players.LocalPlayer
-local Mouse = Player:GetMouse()
-local Camera = game:service("Workspace").CurrentCamera
-local RS = game:service("RunService")
-local UIS = game:service("UserInputService")
+-- ESP Public - Simple 2D Box ESP (based on ESP file)
+-- API: { Start(), Stop(), ESP = { ... } }
 
-repeat wait() until Player.Character ~= nil and Player.Character.PrimaryPart ~= nil
+local runService = game:GetService("RunService")
+local players = game:GetService("Players")
+local localPlayer = players.LocalPlayer
 
-local LerpColorModule = loadstring(game:HttpGet("https://pastebin.com/raw/wRnsJeid"))()
-local HealthBarLerp = LerpColorModule:Lerp(Color3.fromRGB(255, 0, 0), Color3.fromRGB(0, 255, 0))
-
-local function NewCircle(Transparency, Color, Radius, Filled, Thickness)
-    local c = Drawing.new("Circle")
-    c.Transparency = Transparency
-    c.Color = Color
-    c.Visible = false
-    c.Thickness = Thickness
-    c.Position = Vector2.new(0, 0)
-    c.Radius = Radius
-    c.NumSides = math.clamp(Radius*55/100, 10, 75)
-    c.Filled = Filled
-    return c
-end
-
-local RadarInfo = {
-    Position = Vector2.new(200, 200),
-    Radius = 100,
-    Scale = 1, -- Determinant factor on the effect of the relative position for the 2D integration
-    RadarBack = Color3.fromRGB(10, 10, 10),
-    RadarBorder = Color3.fromRGB(75, 75, 75),
-    LocalPlayerDot = Color3.fromRGB(255, 255, 255),
-    PlayerDot = Color3.fromRGB(60, 170, 255),
-    Team = Color3.fromRGB(0, 255, 0),
-    Enemy = Color3.fromRGB(255, 0, 0),
-    Health_Color = true,
-    Team_Check = true
+local ESP = {
+   State = false,
+   Boxes = true,
+   Tracers = false,
+   Names = true,
+   Distance = true,
+   Health = true,
+   TeamCheck = false,
+   TeamColor = true,
+   MaxDistance = 500,
+   BoxColor = Color3.fromRGB(255,0,0),
+   TracerColor = Color3.fromRGB(255,0,0),
+   BoxThickness = 1,
+   TracerThickness = 1,
+   HealthBarPosition = "Left",
+   HealthBarThickness = 3,
+   TracerOrigin = "Bottom",
+   TracerFollowMouse = false,
 }
 
-local RadarBackground = NewCircle(0.9, RadarInfo.RadarBack, RadarInfo.Radius, true, 1)
-RadarBackground.Visible = true
-RadarBackground.Position = RadarInfo.Position
+local espCache = {}
+local _playerAdded
+local _playerRemoved
+local tan, rad = math.tan, math.rad
+local camera
+local _frameCount = 0
 
-local RadarBorder = NewCircle(0.75, RadarInfo.RadarBorder, RadarInfo.Radius, false, 3)
-RadarBorder.Visible = true
-RadarBorder.Position = RadarInfo.Position
-
-local function GetRelative(pos)
-    local char = Player.Character
-    if char ~= nil and char.PrimaryPart ~= nil then
-        local pmpart = char.PrimaryPart
-        local camerapos = Vector3.new(Camera.CFrame.Position.X, pmpart.Position.Y, Camera.CFrame.Position.Z)
-        local newcf = CFrame.new(pmpart.Position, camerapos)
-        local r = newcf:PointToObjectSpace(pos)
-        return r.X, r.Z
-    else
-        return 0, 0
-    end
+local wtvp = function(pos)
+   if not camera then return Vector2.new(), false, 0 end
+   local a, b, c = camera:WorldToViewportPoint(pos)
+   return Vector2.new(a.X, a.Y), b, c
 end
 
-local function PlaceDot(plr)
-    local PlayerDot = NewCircle(1, RadarInfo.PlayerDot, 3, true, 1)
+local function createEsp(player)
+   local drawings = {}
 
-    local function Update()
-        local c 
-        c = game:service("RunService").RenderStepped:Connect(function()
-            local char = plr.Character
-            if char and char:FindFirstChildOfClass("Humanoid") and char.PrimaryPart ~= nil and char:FindFirstChildOfClass("Humanoid").Health > 0 then
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                local scale = RadarInfo.Scale
-                local relx, rely = GetRelative(char.PrimaryPart.Position)
-                local newpos = RadarInfo.Position - Vector2.new(relx * scale, rely * scale) 
-                
-                if (newpos - RadarInfo.Position).magnitude < RadarInfo.Radius-2 then 
-                    PlayerDot.Radius = 3   
-                    PlayerDot.Position = newpos
-                    PlayerDot.Visible = true
-                else 
-                    local dist = (RadarInfo.Position - newpos).magnitude
-                    local calc = (RadarInfo.Position - newpos).unit * (dist - RadarInfo.Radius)
-                    local inside = Vector2.new(newpos.X + calc.X, newpos.Y + calc.Y)
-                    PlayerDot.Radius = 2
-                    PlayerDot.Position = inside
-                    PlayerDot.Visible = true
-                end
+   drawings.box = Drawing.new("Square")
+   drawings.box.Thickness = ESP.BoxThickness
+   drawings.box.Filled = false
+   drawings.box.Color = ESP.BoxColor
+   drawings.box.Visible = false
 
-                PlayerDot.Color = RadarInfo.PlayerDot
-                if RadarInfo.Team_Check then
-                    if plr.TeamColor == Player.TeamColor then
-                        PlayerDot.Color = RadarInfo.Team
-                    else
-                        PlayerDot.Color = RadarInfo.Enemy
-                    end
-                end
+   drawings.boxoutline = Drawing.new("Square")
+   drawings.boxoutline.Thickness = 3
+   drawings.boxoutline.Filled = false
+   drawings.boxoutline.Color = Color3.new()
+   drawings.boxoutline.Visible = false
 
-                if RadarInfo.Health_Color then
-                    PlayerDot.Color = HealthBarLerp(hum.Health / hum.MaxHealth)
-                end
-            else 
-                PlayerDot.Visible = false
-                if Players:FindFirstChild(plr.Name) == nil then
-                    PlayerDot:Remove()
-                    c:Disconnect()
-                end
-            end
-        end)
-    end
-    coroutine.wrap(Update)()
+   drawings.tracer = Drawing.new("Line")
+   drawings.tracer.Thickness = ESP.TracerThickness
+   drawings.tracer.Color = ESP.TracerColor
+   drawings.tracer.Visible = false
+
+   drawings.traceroutline = Drawing.new("Line")
+   drawings.traceroutline.Thickness = ESP.TracerThickness + 2
+   drawings.traceroutline.Color = Color3.new()
+   drawings.traceroutline.Visible = false
+
+   drawings.healthbg = Drawing.new("Line")
+   drawings.healthbg.Thickness = 3
+   drawings.healthbg.Color = Color3.fromRGB(30,30,30)
+   drawings.healthbg.Visible = false
+
+   drawings.healthfill = Drawing.new("Line")
+   drawings.healthfill.Thickness = 2
+   drawings.healthfill.Color = Color3.fromRGB(0,255,0)
+   drawings.healthfill.Visible = false
+
+   drawings.nametag = Drawing.new("Text")
+   drawings.nametag.Center = true
+   drawings.nametag.Outline = true
+   drawings.nametag.Size = 13
+   drawings.nametag.Color = Color3.fromRGB(255,255,255)
+   drawings.nametag.Visible = false
+
+   drawings.disttag = Drawing.new("Text")
+   drawings.disttag.Center = true
+   drawings.disttag.Outline = true
+   drawings.disttag.Size = 12
+   drawings.disttag.Color = Color3.fromRGB(200,200,200)
+   drawings.disttag.Visible = false
+
+   espCache[player] = drawings
 end
 
-for _,v in pairs(Players:GetChildren()) do
-    if v.Name ~= Player.Name then
-        PlaceDot(v)
-    end
+local function removeEsp(player)
+   if espCache[player] then
+       for _, drawing in next, espCache[player] do
+           drawing:Remove()
+       end
+       espCache[player] = nil
+   end
 end
 
-local function NewLocalDot()
-    local d = Drawing.new("Triangle")
-    d.Visible = true
-    d.Thickness = 1
-    d.Filled = true
-    d.Color = RadarInfo.LocalPlayerDot
-    d.PointA = RadarInfo.Position + Vector2.new(0, -6)
-    d.PointB = RadarInfo.Position + Vector2.new(-3, 6)
-    d.PointC = RadarInfo.Position + Vector2.new(3, 6)
-    return d
+local function updateEsp(player, esp)
+   local character = player and player.Character
+   local hum = character and character:FindFirstChildOfClass("Humanoid")
+
+   if not character or not hum or hum.Health <= 0 then
+      for _, d in pairs(esp) do d.Visible = false end
+      return
+   end
+
+   local root = character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Torso") or character.PrimaryPart
+   local head = character:FindFirstChild("Head")
+   if not root or not head then
+      for _, d in pairs(esp) do d.Visible = false end
+      return
+   end
+
+   local dist = (root.Position - camera.CFrame.Position).Magnitude
+   local maxDist = ESP.MaxDistance or 500
+   if dist > maxDist then
+      for _, d in pairs(esp) do d.Visible = false end
+      return
+   end
+
+   if ESP.TeamCheck and player.TeamColor == localPlayer.TeamColor then
+      for _, d in pairs(esp) do d.Visible = false end
+      return
+   end
+
+   local cframe = character:GetModelCFrame()
+   local position, visible, depth = wtvp(cframe.Position)
+   local color = ESP.TeamColor and player.TeamColor.Color or ESP.BoxColor
+
+   esp.box.Thickness = ESP.BoxThickness
+   esp.boxoutline.Thickness = ESP.BoxThickness + 2
+   esp.tracer.Thickness = ESP.TracerThickness
+   esp.traceroutline.Thickness = ESP.TracerThickness + 2
+
+   if cframe and visible and depth then
+      local scaleFactor = 1 / (math.abs(depth) * tan(rad(camera.FieldOfView / 2)) * 2) * 1000
+      local width, height = 4 * scaleFactor, 5 * scaleFactor
+      local x, y = position.X, position.Y
+
+      -- Box
+      if ESP.Boxes then
+         esp.box.Size = Vector2.new(width, height)
+         esp.box.Position = Vector2.new(x - width / 2, y - height / 2)
+         esp.box.Color = color
+         esp.box.Visible = true
+
+         esp.boxoutline.Size = esp.box.Size
+         esp.boxoutline.Position = esp.box.Position
+         esp.boxoutline.Visible = true
+      else
+         esp.box.Visible = false
+         esp.boxoutline.Visible = false
+      end
+
+      -- Health bar
+      if ESP.Health then
+         local hpRatio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+         local hpColor = Color3.fromRGB(0,255,0):Lerp(Color3.fromRGB(255,0,0), 1 - hpRatio)
+         local gap = 4
+
+         if ESP.HealthBarPosition == "Left" then
+            local bx = x - width / 2 - gap
+            esp.healthbg.From = Vector2.new(bx, y + height / 2)
+            esp.healthbg.To = Vector2.new(bx, y - height / 2)
+            esp.healthfill.From = Vector2.new(bx, y + height / 2)
+            esp.healthfill.To = Vector2.new(bx, y + height / 2 - height * hpRatio)
+         elseif ESP.HealthBarPosition == "Right" then
+            local bx = x + width / 2 + gap
+            esp.healthbg.From = Vector2.new(bx, y + height / 2)
+            esp.healthbg.To = Vector2.new(bx, y - height / 2)
+            esp.healthfill.From = Vector2.new(bx, y + height / 2)
+            esp.healthfill.To = Vector2.new(bx, y + height / 2 - height * hpRatio)
+         elseif ESP.HealthBarPosition == "Top" then
+            local by = y - height / 2 - gap
+            esp.healthbg.From = Vector2.new(x - width / 2, by)
+            esp.healthbg.To = Vector2.new(x + width / 2, by)
+            esp.healthfill.From = Vector2.new(x - width / 2, by)
+            esp.healthfill.To = Vector2.new(x - width / 2 + width * hpRatio, by)
+         else -- Bottom
+            local by = y + height / 2 + gap
+            esp.healthbg.From = Vector2.new(x - width / 2, by)
+            esp.healthbg.To = Vector2.new(x + width / 2, by)
+            esp.healthfill.From = Vector2.new(x - width / 2, by)
+            esp.healthfill.To = Vector2.new(x - width / 2 + width * hpRatio, by)
+         end
+
+         esp.healthbg.Visible = true
+         esp.healthfill.Color = hpColor
+         esp.healthfill.Visible = true
+      else
+         esp.healthbg.Visible = false
+         esp.healthfill.Visible = false
+      end
+
+      -- Nametag
+      if ESP.Names then
+         esp.nametag.Text = player.Name
+         esp.nametag.Color = color
+         esp.nametag.Position = Vector2.new(x, y - height / 2 - 14)
+         esp.nametag.Visible = true
+      else
+         esp.nametag.Visible = false
+      end
+
+      -- Distance + Health text
+      if ESP.Distance then
+         local text = math.floor(dist) .. "s"
+         if ESP.Health then
+            text = text .. " | " .. math.floor(hum.Health) .. "hp"
+         end
+         esp.disttag.Text = text
+         esp.disttag.Position = Vector2.new(x, y + height / 2 + 4)
+         esp.disttag.Visible = true
+      else
+         esp.disttag.Visible = false
+      end
+
+      -- Tracer
+      if ESP.Tracers then
+         local origin = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y)
+         local target = Vector2.new(x, y + height / 2)
+
+         esp.traceroutline.From = origin
+         esp.traceroutline.To = target
+         esp.traceroutline.Visible = true
+
+         esp.tracer.From = origin
+         esp.tracer.To = target
+         esp.tracer.Color = color
+         esp.tracer.Visible = true
+      else
+         esp.tracer.Visible = false
+         esp.traceroutline.Visible = false
+      end
+   else
+      esp.box.Visible = false
+      esp.boxoutline.Visible = false
+      esp.tracer.Visible = false
+      esp.traceroutline.Visible = false
+      esp.healthbg.Visible = false
+      esp.healthfill.Visible = false
+      esp.nametag.Visible = false
+      esp.disttag.Visible = false
+   end
 end
 
-local LocalPlayerDot = NewLocalDot()
+local function Start()
+   if ESP.State then return end
+   ESP.State = true
+   camera = workspace.CurrentCamera or camera
+   print("[ESP] Start() called, camera=", tostring(camera))
 
-Players.PlayerAdded:Connect(function(v)
-    if v.Name ~= Player.Name then
-        PlaceDot(v)
-    end
-    LocalPlayerDot:Remove()
-    LocalPlayerDot = NewLocalDot()
-end)
+   for _, player in next, players:GetPlayers() do
+      if player ~= localPlayer then
+         createEsp(player)
+      end
+   end
 
--- Loop
-coroutine.wrap(function()
-    local c 
-    c = game:service("RunService").RenderStepped:Connect(function()
-        if LocalPlayerDot ~= nil then
-            LocalPlayerDot.Color = RadarInfo.LocalPlayerDot
-            LocalPlayerDot.PointA = RadarInfo.Position + Vector2.new(0, -6)
-            LocalPlayerDot.PointB = RadarInfo.Position + Vector2.new(-3, 6)
-            LocalPlayerDot.PointC = RadarInfo.Position + Vector2.new(3, 6)
-        end
-        RadarBackground.Position = RadarInfo.Position
-        RadarBackground.Radius = RadarInfo.Radius
-        RadarBackground.Color = RadarInfo.RadarBack
+   _playerAdded = players.PlayerAdded:Connect(function(player)
+      createEsp(player)
+   end)
 
-        RadarBorder.Position = RadarInfo.Position
-        RadarBorder.Radius = RadarInfo.Radius
-        RadarBorder.Color = RadarInfo.RadarBorder
-    end)
-end)()
+   _playerRemoved = players.PlayerRemoving:Connect(function(player)
+      removeEsp(player)
+   end)
 
--- Draggable
-local inset = game:service("GuiService"):GetGuiInset()
+   runService:BindToRenderStep("esp", Enum.RenderPriority.Camera.Value, function()
+      if not camera or camera.Parent ~= workspace then
+         camera = workspace.CurrentCamera
+         if not camera then return end
+      end
 
-local dragging = false
-local offset = Vector2.new(0, 0)
-UIS.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 and (Vector2.new(Mouse.X, Mouse.Y + inset.Y) - RadarInfo.Position).magnitude < RadarInfo.Radius then
-        offset = RadarInfo.Position - Vector2.new(Mouse.X, Mouse.Y)
-        dragging = true
-    end
-end)
+      _frameCount = _frameCount + 1
+      if _frameCount % 60 == 0 then
+         print("[ESP] alive, tracking", #espCache, "players")
+      end
 
-UIS.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging = false
-    end
-end)
+      for player, drawings in next, espCache do
+         local ok, err = pcall(updateEsp, player, drawings)
+         if not ok then
+            print("[ESP] error:", err)
+         end
+      end
+   end)
+end
 
-coroutine.wrap(function()
-    local dot = NewCircle(1, Color3.fromRGB(255, 255, 255), 3, true, 1)
-    local c 
-    c = game:service("RunService").RenderStepped:Connect(function()
-        if (Vector2.new(Mouse.X, Mouse.Y + inset.Y) - RadarInfo.Position).magnitude < RadarInfo.Radius then
-            dot.Position = Vector2.new(Mouse.X, Mouse.Y + inset.Y)
-            dot.Visible = true
-        else 
-            dot.Visible = false
-        end
-        if dragging then
-            RadarInfo.Position = Vector2.new(Mouse.X, Mouse.Y) + offset
-        end
-    end)
-end)()
+local function Stop()
+   if not ESP.State then return end
+   ESP.State = false
+   runService:UnbindFromRenderStep("esp")
+   if _playerAdded then _playerAdded:Disconnect() _playerAdded = nil end
+   if _playerRemoved then _playerRemoved:Disconnect() _playerRemoved = nil end
+   for player in next, espCache do
+      removeEsp(player)
+   end
+end
 
---[[ Example:
-wait(3)
-RadarInfo.Position = Vector2.new(300, 300)
-RadarInfo.Radius = 150
-RadarInfo.RadarBack = Color3.fromRGB(50, 0, 0)
-]]
+return {
+   Start = Start,
+   Stop = Stop,
+   ESP = ESP,
+}
