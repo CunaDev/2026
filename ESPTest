@@ -1,4 +1,7 @@
-
+-- ESP Public - v4 (Unnamed ESP 패턴 최적화)
+-- BindToRenderStep 분리: 데이터 갱신(300) / 렌더링(200)
+-- 박스: HRP CFrame 앵커링 (드리프트 없음)
+-- Visibility Check: 레이캐스트 + 블랙리스트
 -- API: { Start(), Stop(), ESP = { ... } }
 
 assert(Drawing, 'exploit not supported')
