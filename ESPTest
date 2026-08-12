@@ -191,12 +191,12 @@ local function Start()
             local sy = 2.0 * scale
 
             -- 4 corners projected from HRP CFrame
-            local TL, TLz = Camera:WorldToViewportPoint((cf * CFrame.new(-sx, sy, 0)).Position)
-            local TR, TRz = Camera:WorldToViewportPoint((cf * CFrame.new(sx, sy, 0)).Position)
-            local BR, BRz = Camera:WorldToViewportPoint((cf * CFrame.new(sx, -sy, 0)).Position)
-            local BL, BLz = Camera:WorldToViewportPoint((cf * CFrame.new(-sx, -sy, 0)).Position)
+            local TL, TLOn = Camera:WorldToViewportPoint((cf * CFrame.new(-sx, sy, 0)).Position)
+            local TR, TROn = Camera:WorldToViewportPoint((cf * CFrame.new(sx, sy, 0)).Position)
+            local BR, BROn = Camera:WorldToViewportPoint((cf * CFrame.new(sx, -sy, 0)).Position)
+            local BL, BLOn = Camera:WorldToViewportPoint((cf * CFrame.new(-sx, -sy, 0)).Position)
 
-            local inFront = TLz > 0 and TRz > 0 and BRz > 0 and BLz > 0
+            local inFront = TLOn and TROn and BROn and BLOn and TL.Z > 0
 
             -- Box
             if ESP.Boxes and inFront then
