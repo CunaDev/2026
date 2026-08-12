@@ -1,6 +1,6 @@
--- ESP Module - Blissful Design (Fixed Positioning)
--- Quad-based box, vertical health bar, proper Team Check
--- Module API: { Start(), Stop(), ESP = { ... } }
+-- ESP Module - Blissful Design (fix: sizing, drift, team check, health pos)
+-- Quad box, vertical health bar, modular API
+-- API: { Start(), Stop(), ESP = { ... } }
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -15,8 +15,8 @@ local ESP = {
     Names = true,
     Distance = false,
     Health = true,
-    TeamCheck = false,
-    TeamColor = true,
+    TeamCheck = false,  -- true = hide same-team players
+    TeamColor = true,    -- color by team
     MaxDistance = 500,
     BoxColor = Color3.fromRGB(255, 0, 0),
     TracerColor = Color3.fromRGB(255, 0, 0),
@@ -24,6 +24,7 @@ local ESP = {
     TracerThickness = 1,
     TracerOrigin = "Bottom",
     TracerFollowMouse = false,
+    HealthBarPosition = "Left", -- "Left", "Right", "Top", "Bottom"
 }
 
 local ESP_UI = {}
@@ -87,40 +88,19 @@ local function Colorize(lib, color)
     end
 end
 
-local function GetHeadFootScreen(char, camera)
-    local head = char:FindFirstChild("Head")
-    local root = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
-    if not head or not root then return nil, nil end
+local function BoxSize(ui, cx, cy, halfW, halfH)
+    ui.black.PointA = Vector2.new(cx + halfW + 1, cy - halfH - 1)
+    ui.black.PointB = Vector2.new(cx - halfW - 1, cy - halfH - 1)
+    ui.black.PointC = Vector2.new(cx - halfW - 1, cy + halfH + 1)
+    ui.black.PointD = Vector2.new(cx + halfW + 1, cy + halfH + 1)
 
-    local headPos, headOn = camera:WorldToViewportPoint(head.Position)
-    local rootPos, rootOn = camera:WorldToViewportPoint(root.Position)
-    if not headOn or not rootOn then return nil, nil end
-
-    local distY = math.clamp(math.abs(headPos.Y - rootPos.Y), 2, math.huge)
-
-    return headPos, rootPos, distY
-end
-
-local function BoxSize(ui, cx, cy, halfW, topOff, botOff)
-    ui.black.PointA = Vector2.new(cx + halfW + 1, cy - topOff - 1)
-    ui.black.PointB = Vector2.new(cx - halfW - 1, cy - topOff - 1)
-    ui.black.PointC = Vector2.new(cx - halfW - 1, cy + botOff + 1)
-    ui.black.PointD = Vector2.new(cx + halfW + 1, cy + botOff + 1)
-
-    ui.box.PointA = Vector2.new(cx + halfW, cy - topOff)
-    ui.box.PointB = Vector2.new(cx - halfW, cy - topOff)
-    ui.box.PointC = Vector2.new(cx - halfW, cy + botOff)
-    ui.box.PointD = Vector2.new(cx + halfW, cy + botOff)
+    ui.box.PointA = Vector2.new(cx + halfW, cy - halfH)
+    ui.box.PointB = Vector2.new(cx - halfW, cy - halfH)
+    ui.box.PointC = Vector2.new(cx - halfW, cy + halfH)
+    ui.box.PointD = Vector2.new(cx + halfW, cy + halfH)
 end
 
 local function GetColor(plr)
-    if ESP.TeamCheck then
-        if plr.TeamColor == LocalPlayer.TeamColor then
-            return Color3.fromRGB(0, 255, 0)
-        else
-            return Color3.fromRGB(255, 0, 0)
-        end
-    end
     if ESP.TeamColor then
         return plr.TeamColor.Color
     end
@@ -162,6 +142,12 @@ local function Start()
         local inset = GuiService:GetGuiInset()
 
         for plr, ui in pairs(ESP_UI) do
+            -- Team Check: hide ESP for same team
+            if ESP.TeamCheck and plr.TeamColor == LocalPlayer.TeamColor then
+                for _, d in pairs(ui) do d.Visible = false end
+                continue
+            end
+
             local char = plr.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             if not char or not hum or hum.Health <= 0 then
@@ -169,14 +155,9 @@ local function Start()
                 continue
             end
 
+            local head = char:FindFirstChild("Head")
             local root = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
-            if not root then
-                for _, d in pairs(ui) do d.Visible = false end
-                continue
-            end
-
-            local headPos, rootPos, distY = GetHeadFootScreen(char, camera)
-            if not headPos then
+            if not head or not root then
                 for _, d in pairs(ui) do d.Visible = false end
                 continue
             end
@@ -187,18 +168,44 @@ local function Start()
                 continue
             end
 
-            -- Box: head to roughly feet
-            -- topOffset = head Y relative to root
-            -- bottomOffset = estimated feet Y relative to root
-            local topOff = (rootPos.Y - headPos.Y) * 1.2
-            local botOff = distY * 0.9
-            local halfW = distY * 0.65
+            -- Estimate full character height in 3D
+            -- Head to root is roughly 40% of full height
+            local headToRoot3D = (head.Position - root.Position).Magnitude
+            local fullHeight = headToRoot3D * 2.5
+
+            -- Top of character (above head)
+            local topPos = head.Position + Vector3.new(0, fullHeight * 0.15, 0)
+            -- Bottom of character (feet)
+            local botPos = head.Position - Vector3.new(0, fullHeight * 0.85, 0)
+
+            -- Project to screen
+            local topScreen, topOn = camera:WorldToViewportPoint(topPos)
+            local botScreen, botOn = camera:WorldToViewportPoint(botPos)
+            local rootScreen, rootOn = camera:WorldToViewportPoint(root.Position)
+            rootOn = rootOn -- keep, fallback check below
+
+            if not topOn and not botOn then
+                for _, d in pairs(ui) do d.Visible = false end
+                continue
+            end
+
+            -- Box center = midpoint of top and bottom on screen
+            local boxCY = (topScreen.Y + botScreen.Y) / 2
+            local boxCX = rootScreen.X
+            local boxHalfH = math.abs(topScreen.Y - botScreen.Y) / 2
+            local boxHalfW = boxHalfH * 0.38
+
+            -- Minimum size at distance
+            local minHalfH = math.clamp(800 / dist, 6, 60)
+            if boxHalfH < minHalfH then
+                boxHalfH = minHalfH
+                boxHalfW = boxHalfH * 0.38
+            end
 
             local color = GetColor(plr)
             local boxThick = ESP.BoxThickness
             local tracerThick = ESP.TracerThickness
 
-            -- Update drawing thicknesses
             ui.black.Thickness = boxThick + 2
             ui.box.Thickness = boxThick
             ui.blacktracer.Thickness = tracerThick + 2
@@ -206,7 +213,7 @@ local function Start()
 
             -- Box
             if ESP.Boxes then
-                BoxSize(ui, rootPos.X, rootPos.Y, halfW, topOff, botOff)
+                BoxSize(ui, boxCX, boxCY, boxHalfW, boxHalfH)
                 ui.box.Color = color
                 ui.black.Visible = true
                 ui.box.Visible = true
@@ -215,24 +222,44 @@ local function Start()
                 ui.box.Visible = false
             end
 
-            -- Health bar (vertical, left of box)
+            -- Health bar
             if ESP.Health then
-                local d = distY * 2.1
                 local hpRatio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-                local healthOffset = hpRatio * d
-
-                local barX = rootPos.X - halfW - 5
-                local barTop = rootPos.Y - topOff
-                local barBot = rootPos.Y + botOff
-
-                ui.healthbar.From = Vector2.new(barX, barBot)
-                ui.healthbar.To = Vector2.new(barX, barTop)
-
-                ui.greenhealth.From = Vector2.new(barX, barBot)
-                ui.greenhealth.To = Vector2.new(barX, barBot - healthOffset)
-                ui.greenhealth.Color = Color3.fromRGB(0, 255, 0):lerp(
+                local hpColor = Color3.fromRGB(0, 255, 0):Lerp(
                     Color3.fromRGB(255, 0, 0), 1 - hpRatio)
+                local gap = 4
+                local hpLen = boxHalfH * 2
 
+                if ESP.HealthBarPosition == "Left" then
+                    local bx = boxCX - boxHalfW - gap
+                    ui.healthbar.From = Vector2.new(bx, boxCY + boxHalfH)
+                    ui.healthbar.To = Vector2.new(bx, boxCY - boxHalfH)
+                    ui.greenhealth.From = Vector2.new(bx, boxCY + boxHalfH)
+                    ui.greenhealth.To = Vector2.new(bx, boxCY + boxHalfH - hpLen * hpRatio)
+                elseif ESP.HealthBarPosition == "Right" then
+                    local bx = boxCX + boxHalfW + gap
+                    ui.healthbar.From = Vector2.new(bx, boxCY + boxHalfH)
+                    ui.healthbar.To = Vector2.new(bx, boxCY - boxHalfH)
+                    ui.greenhealth.From = Vector2.new(bx, boxCY + boxHalfH)
+                    ui.greenhealth.To = Vector2.new(bx, boxCY + boxHalfH - hpLen * hpRatio)
+                elseif ESP.HealthBarPosition == "Top" then
+                    local by = boxCY - boxHalfH - gap
+                    local hpW = boxHalfW * 2
+                    ui.healthbar.From = Vector2.new(boxCX - boxHalfW, by)
+                    ui.healthbar.To = Vector2.new(boxCX + boxHalfW, by)
+                    ui.greenhealth.From = Vector2.new(boxCX - boxHalfW, by)
+                    ui.greenhealth.To = Vector2.new(boxCX - boxHalfW + hpW * hpRatio, by)
+                else -- Bottom
+                    local by = boxCY + boxHalfH + gap
+                    local hpW = boxHalfW * 2
+                    ui.healthbar.From = Vector2.new(boxCX - boxHalfW, by)
+                    ui.healthbar.To = Vector2.new(boxCX + boxHalfW, by)
+                    ui.greenhealth.From = Vector2.new(boxCX - boxHalfW, by)
+                    ui.greenhealth.To = Vector2.new(boxCX - boxHalfW + hpW * hpRatio, by)
+                end
+
+                ui.greenhealth.Color = hpColor
+                ui.healthbar.Color = Color3.fromRGB(0, 0, 0)
                 ui.healthbar.Visible = true
                 ui.greenhealth.Visible = true
             else
@@ -244,7 +271,7 @@ local function Start()
             if ESP.Names then
                 ui.name.Text = plr.Name
                 ui.name.Color = color
-                ui.name.Position = Vector2.new(rootPos.X, rootPos.Y - topOff - 16)
+                ui.name.Position = Vector2.new(boxCX, boxCY - boxHalfH - 16)
                 ui.name.Visible = true
             else
                 ui.name.Visible = false
@@ -253,7 +280,7 @@ local function Start()
             -- Distance
             if ESP.Distance then
                 ui.dist.Text = math.floor(dist) .. "s"
-                ui.dist.Position = Vector2.new(rootPos.X, rootPos.Y + botOff + 4)
+                ui.dist.Position = Vector2.new(boxCX, boxCY + boxHalfH + 4)
                 ui.dist.Visible = true
             else
                 ui.dist.Visible = false
@@ -265,12 +292,12 @@ local function Start()
                 if ESP.TracerFollowMouse then
                     origin = Vector2.new(mouse.X, mouse.Y - inset.Y)
                 elseif ESP.TracerOrigin == "Middle" then
-                    origin = viewport * 0.5
+                    origin = Vector2.new(viewport.X / 2, viewport.Y / 2)
                 else
-                    origin = Vector2.new(viewport.X * 0.5, viewport.Y)
+                    origin = Vector2.new(viewport.X / 2, viewport.Y)
                 end
 
-                local target = Vector2.new(rootPos.X, rootPos.Y + botOff)
+                local target = Vector2.new(boxCX, boxCY + boxHalfH)
 
                 ui.blacktracer.From = origin
                 ui.blacktracer.To = target
