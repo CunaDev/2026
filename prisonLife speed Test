@@ -1,23 +1,4 @@
---[[
-	모듈   : speedBipassLOL.lua
-	프로젝트 : PRISONLIFE — Roblox Prison Life 허브
-	목적   : 투명 VehicleSeat 기반 속도 우회 — WalkSpeed 무수정
 
-	원리
-		workspace 에 투명 VehicleSeat 를 생성, 플레이어를 앉힌다.
-		서버는 "탑승 중" 으로 인식 → WalkSpeed 검사 대상에서 제외.
-		이동은 VehicleSeat.AssemblyLinearVelocity 를 WASD 방향으로
-		가해 추진한다. Humanoid.WalkSpeed 는 절대 건드리지 않는다.
-
-		좌석은 매 프레임 캐릭터 발밑으로 CFrame 을 따라붙게 한다.
-		클라이언트 표시는 달리기 애니메이션으로 앉은 자세를 덮는다.
-
-	인터페이스 (전역 `SpeedBypass`, 반환값으로도 사용 가능)
-		SpeedBypass.Toggle(boolean?) -> boolean
-		SpeedBypass.SetSpeed(number) -> number
-		SpeedBypass.GetStatus()      -> table
-		SpeedBypass.Destroy()        -> nil
---]]
 
 local SpeedBypass = {}
 
