@@ -1,18 +1,13 @@
--- ESP Public - v4 (Unnamed ESP 패턴 최적화)
--- BindToRenderStep 분리: 데이터 갱신(300) / 렌더링(200)
--- 박스: HRP CFrame 앵커링 (드리프트 없음)
--- Visibility Check: 레이캐스트 + 블랙리스트
+-- ESP Public - v5 (Simple & Stable)
+-- Quad box, 4-corner HRP anchored, Visibility Check, Team Check
 -- API: { Start(), Stop(), ESP = { ... } }
 
-assert(Drawing, 'exploit not supported')
-
-if not cloneref then cloneref = function(o) return o end end
-
-local RunService = cloneref(game:GetService('RunService'))
-local Players = cloneref(game:GetService('Players'))
-local GuiService = cloneref(game:GetService('GuiService'))
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local GuiService = game:GetService("GuiService")
 local LocalPlayer = Players.LocalPlayer
 local mouse = LocalPlayer:GetMouse()
+local Camera = workspace.CurrentCamera
 
 local ESP = {
     State = false,
@@ -21,64 +16,53 @@ local ESP = {
     Names = true,
     Distance = false,
     Health = true,
-    TeamCheck = false,      -- true = 같은 팀 숨김
-    TeamColor = true,       -- 팀 컬러
-    VisCheck = false,       -- 가시성 체크 (레이캐스트)
+    TeamCheck = false,
+    TeamColor = true,
+    VisCheck = false,
     MaxDistance = 500,
-    RefreshRate = 50,       -- 데이터 갱신 주기 (ms)
     BoxColor = Color3.fromRGB(255, 60, 60),
     TracerColor = Color3.fromRGB(255, 60, 60),
     BoxThickness = 1,
     TracerThickness = 1,
-    TracerOrigin = "Bottom",   -- "Bottom" / "Middle" / "Mouse"
+    TracerOrigin = "Bottom",
     TracerFollowMouse = false,
-    HealthBarPosition = "Left", -- "Left" / "Right" / "Top" / "Bottom"
+    HealthBarPosition = "Left",
 }
 
-local ESP_UI = {}          -- [plr] = drawing objects
-local ESP_Data = {}        -- [plr] = { color = Color3, pass = bool } (갱신 주기로 계산)
+local ESP_UI = {}
+local ESP_Data = {}
 local ESP_Connections = {}
-local Camera = workspace.CurrentCamera
-local WTVP = Camera.WorldToViewportPoint
-local WorldToViewport = function(...) return WTVP(Camera, ...) end
+local ESP_Render
 
-local RSName = 'PRISONLIFE_ESP_RENDER_' .. tostring(math.random(1, 9999))
-local DSCan = RSName .. '_DATA'
-local DSDraw = RSName .. '_DRAW'
+-- Ignore list for raycast
+local IgnoreList = {}
 
--- 레이캐스트 블랙리스트 (3초마다 갱신)
-local LastRayIgnoreUpdate = 0
-local RayParams = RaycastParams.new()
-local function RefreshRayIgnore()
-    LastRayIgnoreUpdate = tick()
-    local filter = {}
-    if LocalPlayer.Character then table.insert(filter, LocalPlayer.Character) end
-    table.insert(filter, Camera)
-    if mouse.TargetFilter then table.insert(filter, mouse.TargetFilter) end
-    RayParams.FilterType = Enum.RaycastFilterType.Blacklist
-    RayParams.FilterDescendantsInstances = filter
+local function IgnoreRefresh()
+    IgnoreList = { LocalPlayer.Character, Camera }
+    if mouse.TargetFilter then
+        table.insert(IgnoreList, mouse.TargetFilter)
+    end
 end
 
-local function CheckRay(origin, direction, distance, targetModel)
-    if not targetModel then return false end
-    if tick() - LastRayIgnoreUpdate > 3 then
-        RefreshRayIgnore()
-    end
-    local result = workspace:Raycast(origin, direction * distance, RayParams)
-    if result and result.Instance and not result.Instance:IsDescendantOf(targetModel) then
+local function IsVisible(origin, target, char)
+    if not char then return true end
+    local dir = (target - origin).unit
+    local dist = (target - origin).Magnitude
+    local hit = workspace:FindPartOnRayWithIgnoreList(
+        Ray.new(origin, dir * dist), IgnoreList)
+    if hit and not hit:IsDescendantOf(char) then
         return false
     end
     return true
 end
 
--- 드로잉 객체
 local function NewQuad(color)
-    local q = Drawing.new('Quad')
+    local q = Drawing.new("Quad")
     q.Visible = false
-    q.PointA = Vector2.zero
-    q.PointB = Vector2.zero
-    q.PointC = Vector2.zero
-    q.PointD = Vector2.zero
+    q.PointA = Vector2.new(0, 0)
+    q.PointB = Vector2.new(0, 0)
+    q.PointC = Vector2.new(0, 0)
+    q.PointD = Vector2.new(0, 0)
     q.Color = color
     q.Filled = false
     q.Thickness = 1
@@ -87,10 +71,10 @@ local function NewQuad(color)
 end
 
 local function NewLine(color)
-    local l = Drawing.new('Line')
+    local l = Drawing.new("Line")
     l.Visible = false
-    l.From = Vector2.zero
-    l.To = Vector2.zero
+    l.From = Vector2.new(0, 0)
+    l.To = Vector2.new(0, 0)
     l.Color = color
     l.Thickness = 1
     l.Transparency = 1
@@ -98,11 +82,10 @@ local function NewLine(color)
 end
 
 local function NewText(color, size)
-    local t = Drawing.new('Text')
+    local t = Drawing.new("Text")
     t.Visible = false
     t.Center = true
     t.Outline = true
-    t.OutlineColor = Color3.fromRGB(20, 20, 20)
     t.Size = size
     t.Color = color
     t.Transparency = 1
@@ -145,222 +128,10 @@ local function Unregister(plr)
     ESP_Data[plr] = nil
 end
 
--- ===================== 데이터 갱신 (우선순위 300) =====================
-local LastRefresh = 0
-
-local function ScanPlayers()
-    if tick() - LastRefresh < ESP.RefreshRate / 1000 then return end
-    LastRefresh = tick()
-
-    -- 카메라 변경 감지 (레드존 등)
-    if Camera.Parent ~= workspace then
-        Camera = workspace.CurrentCamera
-        WTVP = Camera.WorldToViewportPoint
-        WorldToViewport = function(...) return WTVP(Camera, ...) end
-        RefreshRayIgnore()
-    end
-
-    local camPos = Camera.CFrame.Position
-
-    for plr, data in pairs(ESP_Data) do
-        data.pass = false
-    end
-
-    for plr in pairs(ESP_UI) do
-        if ESP.TeamCheck and plr.TeamColor == LocalPlayer.TeamColor then
-            continue
-        end
-        local char = plr.Character
-        if not char then continue end
-        local hum = char:FindFirstChildOfClass('Humanoid')
-        local root = char:FindFirstChild('HumanoidRootPart') or char.PrimaryPart
-        local head = char:FindFirstChild('Head')
-        if not hum or not root or not head or hum.Health <= 0 then continue end
-
-        local distance = (root.Position - camPos).Magnitude
-        if distance > ESP.MaxDistance then continue end
-
-        local pass = true
-        if ESP.VisCheck then
-            pass = CheckRay(camPos, (head.Position - camPos).unit, distance, char)
-        end
-
-        ESP_Data[plr] = {
-            pass = pass,
-            color = GetColor(plr),
-            char = char,
-            headScr = WorldToViewport(head.Position),
-            rootScr = WorldToViewport(root.Position),
-            distance = distance,
-        }
-    end
-end
-
--- ===================== 렌더링 (우선순위 200) =====================
-local function DrawPlayers()
-    local viewport = Camera.ViewportSize
-    local inset = GuiService:GetGuiInset()
-
-    for plr, ui in pairs(ESP_UI) do
-        local data = ESP_Data[plr]
-        local char = plr.Character
-        local hum = char and char:FindFirstChildOfClass('Humanoid')
-
-        if not data or not data.pass or not char or not hum or hum.Health <= 0 then
-            for _, d in pairs(ui) do d.Visible = false end
-            continue
-        end
-
-        local root = char:FindFirstChild('HumanoidRootPart') or char.PrimaryPart
-        local head = char:FindFirstChild('Head')
-        if not root or not head then
-            for _, d in pairs(ui) do d.Visible = false end
-            continue
-        end
-
-        local cf = root:GetRenderCFrame()
-        local scale = head.Size.Y
-        local sx = 0.9 * scale
-        local sy = 2.0 * scale
-
-        -- 4코너 투영 (HRP CFrame 앵커링 → 드리프트 없음)
-        local TL, TLz = WorldToViewport((cf * CFrame.new(-sx, sy, 0)).Position)
-        local TR, TRz = WorldToViewport((cf * CFrame.new(sx, sy, 0)).Position)
-        local BR, BRz = WorldToViewport((cf * CFrame.new(sx, -sy, 0)).Position)
-        local BL, BLz = WorldToViewport((cf * CFrame.new(-sx, -sy, 0)).Position)
-
-        local inFront = TLz > 0 and TRz > 0 and BRz > 0 and BLz > 0
-
-        local color = data.color
-        local boxThick = ESP.BoxThickness
-        local tracerThick = ESP.TracerThickness
-
-        ui.box.Thickness = boxThick
-        ui.boxOutline.Thickness = boxThick + 2
-
-        -- 박스
-        if ESP.Boxes and inFront then
-            local o = 1
-            ui.boxOutline.PointA = TL + Vector2.new(o, -o)
-            ui.boxOutline.PointB = TR + Vector2.new(-o, -o)
-            ui.boxOutline.PointC = BR + Vector2.new(-o, o)
-            ui.boxOutline.PointD = BL + Vector2.new(o, o)
-            ui.boxOutline.Color = Color3.fromRGB(20, 20, 20)
-            ui.boxOutline.Visible = true
-
-            ui.box.PointA = TL
-            ui.box.PointB = TR
-            ui.box.PointC = BR
-            ui.box.PointD = BL
-            ui.box.Color = color
-            ui.box.Visible = true
-        else
-            ui.box.Visible = false
-            ui.boxOutline.Visible = false
-        end
-
-        -- 체력바
-        if ESP.Health and inFront then
-            local hpRatio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-            local hpColor = Color3.fromRGB(0, 255, 0):Lerp(Color3.fromRGB(255, 0, 0), 1 - hpRatio)
-            local gap = 5
-
-            if ESP.HealthBarPosition == 'Left' then
-                local bx = BL.X - gap
-                ui.healthBg.From = Vector2.new(bx, BL.Y)
-                ui.healthBg.To = Vector2.new(bx, TL.Y)
-                ui.healthFill.From = Vector2.new(bx, BL.Y)
-                ui.healthFill.To = Vector2.new(bx, BL.Y - (BL.Y - TL.Y) * hpRatio)
-            elseif ESP.HealthBarPosition == 'Right' then
-                local bx = BR.X + gap
-                ui.healthBg.From = Vector2.new(bx, BR.Y)
-                ui.healthBg.To = Vector2.new(bx, TR.Y)
-                ui.healthFill.From = Vector2.new(bx, BR.Y)
-                ui.healthFill.To = Vector2.new(bx, BR.Y - (BR.Y - TR.Y) * hpRatio)
-            elseif ESP.HealthBarPosition == 'Top' then
-                local by = TL.Y - gap
-                ui.healthBg.From = Vector2.new(TL.X, by)
-                ui.healthBg.To = Vector2.new(TR.X, by)
-                ui.healthFill.From = Vector2.new(TL.X, by)
-                ui.healthFill.To = Vector2.new(TL.X + (TR.X - TL.X) * hpRatio, by)
-            else -- Bottom
-                local by = BL.Y + gap
-                ui.healthBg.From = Vector2.new(BL.X, by)
-                ui.healthBg.To = Vector2.new(BR.X, by)
-                ui.healthFill.From = Vector2.new(BL.X, by)
-                ui.healthFill.To = Vector2.new(BL.X + (BR.X - BL.X) * hpRatio, by)
-            end
-
-            ui.healthBg.Color = Color3.fromRGB(30, 30, 30)
-            ui.healthBg.Thickness = 3
-            ui.healthBg.Visible = true
-
-            ui.healthFill.Color = hpColor
-            ui.healthFill.Thickness = 2
-            ui.healthFill.Visible = true
-        else
-            ui.healthBg.Visible = false
-            ui.healthFill.Visible = false
-        end
-
-        -- 이름 (박스 위)
-        if ESP.Names and inFront then
-            local topCenter = WorldToViewport((cf * CFrame.new(0, sy + 0.15, 0)).Position)
-            ui.name.Text = plr.Name
-            ui.name.Position = Vector2.new(topCenter.X, topCenter.Y)
-            ui.name.Color = color
-            ui.name.Visible = true
-        else
-            ui.name.Visible = false
-        end
-
-        -- 거리 (박스 아래)
-        if ESP.Distance and inFront then
-            local botCenter = WorldToViewport((cf * CFrame.new(0, -sy, 0)).Position)
-            ui.dist.Text = math.floor(data.distance) .. 's'
-            ui.dist.Position = Vector2.new(botCenter.X, botCenter.Y + 4)
-            ui.dist.Visible = true
-        else
-            ui.dist.Visible = false
-        end
-
-        -- 트레이서
-        if ESP.Tracers then
-            local origin
-            if ESP.TracerFollowMouse then
-                origin = Vector2.new(mouse.X, mouse.Y - inset.Y)
-            elseif ESP.TracerOrigin == 'Mouse' then
-                origin = Vector2.new(mouse.X, mouse.Y - inset.Y)
-            elseif ESP.TracerOrigin == 'Middle' then
-                origin = Vector2.new(viewport.X / 2, viewport.Y / 2)
-            else -- Bottom
-                origin = Vector2.new(viewport.X / 2, viewport.Y)
-            end
-
-            local target = WorldToViewport((cf * CFrame.new(0, -sy, 0)).Position)
-
-            ui.tracerOutline.From = origin
-            ui.tracerOutline.To = Vector2.new(target.X, target.Y)
-            ui.tracerOutline.Thickness = tracerThick + 2
-            ui.tracerOutline.Visible = true
-
-            ui.tracer.From = origin
-            ui.tracer.To = Vector2.new(target.X, target.Y)
-            ui.tracer.Thickness = tracerThick
-            ui.tracer.Color = color
-            ui.tracer.Visible = true
-        else
-            ui.tracer.Visible = false
-            ui.tracerOutline.Visible = false
-        end
-    end
-end
-
--- ===================== 수명주기 =====================
 local function Start()
     if ESP.State then return end
     ESP.State = true
-    RefreshRayIgnore()
+    IgnoreRefresh()
 
     for _, plr in ipairs(Players:GetPlayers()) do
         Register(plr)
@@ -369,17 +140,188 @@ local function Start()
     table.insert(ESP_Connections, Players.PlayerAdded:Connect(Register))
     table.insert(ESP_Connections, Players.PlayerRemoving:Connect(Unregister))
 
-    RunService:BindToRenderStep(DSCan, 300, ScanPlayers)
-    RunService:BindToRenderStep(DSDraw, 200, DrawPlayers)
-end
+    ESP_Render = RunService.RenderStepped:Connect(function()
+        if Camera.Parent ~= workspace then
+            Camera = workspace.CurrentCamera
+        end
+        local viewport = Camera.ViewportSize
+        local inset = GuiService:GetGuiInset()
+        local camPos = Camera.CFrame.Position
 
-function seqReset() end -- noop, 이름 충돌 방지용
+        for plr, ui in pairs(ESP_UI) do
+            -- TeamCheck: hide same team
+            if ESP.TeamCheck and plr.TeamColor == LocalPlayer.TeamColor then
+                for _, d in pairs(ui) do d.Visible = false end
+                continue
+            end
+
+            local char = plr.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if not char or not hum or hum.Health <= 0 then
+                for _, d in pairs(ui) do d.Visible = false end
+                continue
+            end
+
+            local root = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
+            local head = char:FindFirstChild("Head")
+            if not root or not head then
+                for _, d in pairs(ui) do d.Visible = false end
+                continue
+            end
+
+            local dist = (root.Position - camPos).Magnitude
+            if dist > ESP.MaxDistance then
+                for _, d in pairs(ui) do d.Visible = false end
+                continue
+            end
+
+            -- Visibility check
+            if ESP.VisCheck then
+                local visible = IsVisible(camPos, head.Position, char)
+                if not visible then
+                    for _, d in pairs(ui) do d.Visible = false end
+                    continue
+                end
+            end
+
+            local color = GetColor(plr)
+            local cf = root.CFrame
+            local scale = head.Size.Y
+            local sx = 0.9 * scale
+            local sy = 2.0 * scale
+
+            -- 4 corners projected from HRP CFrame
+            local TL, TLz = Camera:WorldToViewportPoint((cf * CFrame.new(-sx, sy, 0)).Position)
+            local TR, TRz = Camera:WorldToViewportPoint((cf * CFrame.new(sx, sy, 0)).Position)
+            local BR, BRz = Camera:WorldToViewportPoint((cf * CFrame.new(sx, -sy, 0)).Position)
+            local BL, BLz = Camera:WorldToViewportPoint((cf * CFrame.new(-sx, -sy, 0)).Position)
+
+            local inFront = TLz > 0 and TRz > 0 and BRz > 0 and BLz > 0
+
+            -- Box
+            if ESP.Boxes and inFront then
+                ui.boxOutline.PointA = Vector2.new(TL.X - 1, TL.Y + 1)
+                ui.boxOutline.PointB = Vector2.new(TR.X + 1, TR.Y + 1)
+                ui.boxOutline.PointC = Vector2.new(BR.X + 1, BR.Y - 1)
+                ui.boxOutline.PointD = Vector2.new(BL.X - 1, BL.Y - 1)
+                ui.boxOutline.Color = Color3.fromRGB(20, 20, 20)
+                ui.boxOutline.Thickness = ESP.BoxThickness + 2
+                ui.boxOutline.Visible = true
+
+                ui.box.PointA = TL
+                ui.box.PointB = TR
+                ui.box.PointC = BR
+                ui.box.PointD = BL
+                ui.box.Color = color
+                ui.box.Thickness = ESP.BoxThickness
+                ui.box.Visible = true
+            else
+                ui.box.Visible = false
+                ui.boxOutline.Visible = false
+            end
+
+            -- Health bar
+            if ESP.Health and inFront then
+                local hpRatio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+                local hpColor = Color3.fromRGB(0, 255, 0):Lerp(Color3.fromRGB(255, 0, 0), 1 - hpRatio)
+                local gap = 5
+
+                if ESP.HealthBarPosition == "Left" then
+                    local bx = BL.X - gap
+                    ui.healthBg.From = Vector2.new(bx, BL.Y)
+                    ui.healthBg.To = Vector2.new(bx, TL.Y)
+                    ui.healthFill.From = Vector2.new(bx, BL.Y)
+                    ui.healthFill.To = Vector2.new(bx, BL.Y - (BL.Y - TL.Y) * hpRatio)
+                elseif ESP.HealthBarPosition == "Right" then
+                    local bx = BR.X + gap
+                    ui.healthBg.From = Vector2.new(bx, BR.Y)
+                    ui.healthBg.To = Vector2.new(bx, TR.Y)
+                    ui.healthFill.From = Vector2.new(bx, BR.Y)
+                    ui.healthFill.To = Vector2.new(bx, BR.Y - (BR.Y - TR.Y) * hpRatio)
+                elseif ESP.HealthBarPosition == "Top" then
+                    local by = TL.Y - gap
+                    ui.healthBg.From = Vector2.new(TL.X, by)
+                    ui.healthBg.To = Vector2.new(TR.X, by)
+                    ui.healthFill.From = Vector2.new(TL.X, by)
+                    ui.healthFill.To = Vector2.new(TL.X + (TR.X - TL.X) * hpRatio, by)
+                else -- Bottom
+                    local by = BL.Y + gap
+                    ui.healthBg.From = Vector2.new(BL.X, by)
+                    ui.healthBg.To = Vector2.new(BR.X, by)
+                    ui.healthFill.From = Vector2.new(BL.X, by)
+                    ui.healthFill.To = Vector2.new(BL.X + (BR.X - BL.X) * hpRatio, by)
+                end
+
+                ui.healthBg.Color = Color3.fromRGB(30, 30, 30)
+                ui.healthBg.Thickness = 3
+                ui.healthBg.Visible = true
+                ui.healthFill.Color = hpColor
+                ui.healthFill.Thickness = 2
+                ui.healthFill.Visible = true
+            else
+                ui.healthBg.Visible = false
+                ui.healthFill.Visible = false
+            end
+
+            -- Name
+            if ESP.Names and inFront then
+                local nY = (TL.Y + TR.Y) / 2 - sy * 0.4
+                ui.name.Text = plr.Name
+                ui.name.Position = Vector2.new((TL.X + TR.X) / 2, nY)
+                ui.name.Color = color
+                ui.name.Visible = true
+            else
+                ui.name.Visible = false
+            end
+
+            -- Distance
+            if ESP.Distance and inFront then
+                local dY = (BL.Y + BR.Y) / 2 + 4
+                ui.dist.Text = math.floor(dist) .. "s"
+                ui.dist.Position = Vector2.new((BL.X + BR.X) / 2, dY)
+                ui.dist.Visible = true
+            else
+                ui.dist.Visible = false
+            end
+
+            -- Tracer
+            if ESP.Tracers then
+                local origin
+                if ESP.TracerFollowMouse or ESP.TracerOrigin == "Mouse" then
+                    origin = Vector2.new(mouse.X, mouse.Y - inset.Y)
+                elseif ESP.TracerOrigin == "Middle" then
+                    origin = Vector2.new(viewport.X / 2, viewport.Y / 2)
+                else
+                    origin = Vector2.new(viewport.X / 2, viewport.Y)
+                end
+
+                local target = Vector2.new((BL.X + BR.X) / 2, (BL.Y + BR.Y) / 2)
+
+                ui.tracerOutline.From = origin
+                ui.tracerOutline.To = target
+                ui.tracerOutline.Thickness = ESP.TracerThickness + 2
+                ui.tracerOutline.Visible = true
+
+                ui.tracer.From = origin
+                ui.tracer.To = target
+                ui.tracer.Thickness = ESP.TracerThickness
+                ui.tracer.Color = color
+                ui.tracer.Visible = true
+            else
+                ui.tracer.Visible = false
+                ui.tracerOutline.Visible = false
+            end
+        end
+    end)
+end
 
 local function Stop()
     if not ESP.State then return end
     ESP.State = false
-    RunService:UnbindFromRenderStep(DSCan)
-    RunService:UnbindFromRenderStep(DSDraw)
+    if ESP_Render then
+        ESP_Render:Disconnect()
+        ESP_Render = nil
+    end
     for _, conn in ipairs(ESP_Connections) do
         pcall(conn.Disconnect, conn)
     end
