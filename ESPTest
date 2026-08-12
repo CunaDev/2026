@@ -27,6 +27,8 @@ local ESP = {
 }
 
 local espCache = {}
+local _playerAdded
+local _playerRemoved
 local tan, rad = math.tan, math.rad
 local wtvp = function(pos)
    local a, b, c = camera:WorldToViewportPoint(pos)
@@ -251,17 +253,21 @@ local function Start()
    if ESP.State then return end
    ESP.State = true
 
+   -- 이전 연결 정리 (중복 방지)
+   if _playerAdded then _playerAdded:Disconnect() end
+   if _playerRemoved then _playerRemoved:Disconnect() end
+
    for _, player in next, players:GetPlayers() do
       if player ~= localPlayer then
          createEsp(player)
       end
    end
 
-   players.PlayerAdded:Connect(function(player)
+   _playerAdded = players.PlayerAdded:Connect(function(player)
       createEsp(player)
    end)
 
-   players.PlayerRemoving:Connect(function(player)
+   _playerRemoved = players.PlayerRemoving:Connect(function(player)
       removeEsp(player)
    end)
 
@@ -294,6 +300,8 @@ local function Stop()
    if not ESP.State then return end
    ESP.State = false
    runService:UnbindFromRenderStep("esp")
+   if _playerAdded then _playerAdded:Disconnect() _playerAdded = nil end
+   if _playerRemoved then _playerRemoved:Disconnect() _playerRemoved = nil end
    for player in next, espCache do
       removeEsp(player)
    end
