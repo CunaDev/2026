@@ -20,8 +20,7 @@ local ESP = {
     TracerColor = Color3.fromRGB(255, 60, 60),
     TracerThickness = 1,
     BoxThickness = 1,
-    TracerOrigin = "Bottom", -- "Bottom" or "Middle"
-    TracerFollowMouse = false,
+    TracerOrigin = "Bottom", -- "Bottom", "Middle" or "Mouse"
 }
 
 local ESP_Data = {}
@@ -57,14 +56,14 @@ local function SetupUI(ui)
     InitDraw(ui.boxOutline)
     ui.boxOutline.Filled = false
     ui.boxOutline.Color = Color3.fromRGB(0, 0, 0)
-    ui.boxOutline.Thickness = ESP.BoxThickness * 2 + 2
+    ui.boxOutline.Thickness = ESP.BoxThickness * 2
 
     InitDraw(ui.tracer)
     ui.tracer.Color = ESP.TracerColor
 
     InitDraw(ui.tracerOutline)
     ui.tracerOutline.Color = Color3.fromRGB(0, 0, 0)
-    ui.tracerOutline.Thickness = ESP.TracerThickness * 2 + 2
+    ui.tracerOutline.Thickness = ESP.TracerThickness * 2
 
     InitDraw(ui.healthBg)
     ui.healthBg.Filled = true
@@ -212,6 +211,9 @@ local function Start()
                 }
             end
 
+            -- 폭이 과하게 넓어지는 것 방지 (팔 벌림 등): 높이 기반으로 폭 제한
+            bb.Width = math.min(bb.Width, bb.Height * 0.65)
+
             local color = GetColor(char)
             local boxThick = ESP.BoxThickness
             local tracerThick = ESP.TracerThickness
@@ -276,8 +278,8 @@ local function Start()
             -- Tracer (with outline)
             if ESP.Tracers then
                 local origin
-                if ESP.TracerFollowMouse then
-                    origin = Vector2.new(mouse.X, mouse.Y + 36)
+                if ESP.TracerOrigin == "Mouse" then
+                    origin = Vector2.new(mouse.X, mouse.Y)
                 elseif ESP.TracerOrigin == "Middle" then
                     origin = viewport * 0.5
                 else -- Bottom
