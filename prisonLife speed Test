@@ -1,35 +1,51 @@
+--[[
+	모듈   : speedBipassLOL.lua
+	프로젝트 : PRISONLIFE — Roblox Prison Life 허브
+	목적   : 투명 VehicleSeat 기반 속도 우회 — WalkSpeed 무수정
 
+	원리
+		workspace 에 투명 VehicleSeat 를 생성, 플레이어를 앉힌다.
+		서버는 "탑승 중" 으로 인식 → WalkSpeed 검사 대상에서 제외.
+		이동은 VehicleSeat.AssemblyLinearVelocity 를 WASD 방향으로
+		가해 추진한다. Humanoid.WalkSpeed 는 절대 건드리지 않는다.
+
+		좌석은 매 프레임 캐릭터 발밑으로 CFrame 을 따라붙게 한다.
+		클라이언트 표시는 달리기 애니메이션으로 앉은 자세를 덮는다.
+
+	인터페이스 (전역 `SpeedBypass`, 반환값으로도 사용 가능)
+		SpeedBypass.Toggle(boolean?) -> boolean
+		SpeedBypass.SetSpeed(number) -> number
+		SpeedBypass.GetStatus()      -> table
+		SpeedBypass.Destroy()        -> nil
+--]]
 
 local SpeedBypass = {}
 
--- ------------------------------------------------------------------
--- 내부 상태
--- ------------------------------------------------------------------
 local State = {
-	Enabled           = false,   -- 마스터 토글
-	CurrentSpeed      = 16,      -- 활성화 시 목표 속도
-	Seat              = nil,     -- 투명 VehicleSeat 인스턴스
-	Character         = nil,     -- 현재(로컬) 캐릭터
-	Humanoid          = nil,     -- 현재 휴머노이드
-	Root              = nil,     -- HumanoidRootPart
-	RunAnim           = nil,     -- 달리기 애니메이션 트랙
-	ConnCharacterAdded = nil,    -- CharacterAdded 연결
-	ConnHeartbeat       = nil,    -- Heartbeat 연결
+	Enabled           = false,
+	CurrentSpeed      = 16,
+	Seat              = nil,     -- workspace 의 투명 VehicleSeat
+	Character         = nil,
+	Humanoid          = nil,
+	Root              = nil,
+	RunAnim           = nil,
+	ConnCharacterAdded = nil,
+	ConnHeartbeat       = nil,
 }
 
 local SPEED_MIN   = 0
 local SPEED_MAX   = 500
-local SEAT_OFFSET = CFrame.new(0, -2, 0)   -- 캐릭터 발밑 배치용 오프셋
-local RUN_ANIM_ID = "rbxassetid://180435571"  -- R15 달리기 애니메이션 (자세 오버라이드용)
+local SEAT_OFFSET = CFrame.new(0, -2, 0)      -- 발밑 배치
+local RUN_ANIM_ID = "rbxassetid://180435571"  -- R15 달리기 애니메이션
 
-local Players           = game:GetService("Players")
-local RunService        = game:GetService("RunService")
-local UserInputService  = game:GetService("UserInputService")
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
 
 -- ------------------------------------------------------------------
--- 안전 래퍼
+-- 디버그
 -- ------------------------------------------------------------------
 local DEBUG = true
 local function Log(msg)
@@ -57,80 +73,86 @@ end
 local function PlayRunAnimation()
 	SafeCall(function()
 		local humanoid = State.Humanoid
-		if not humanoid then
-			return
-		end
-
+		if not humanoid then return end
 		local animator = humanoid:FindFirstChildOfClass("Animator")
-		if not animator then
-			return
-		end
-
-		-- 이미 재생 중이면 유지
-		if State.RunAnim and State.RunAnim.IsPlaying then
-			return
-		end
+		if not animator then return end
+		if State.RunAnim and State.RunAnim.IsPlaying then return end
 
 		local anim = Instance.new("Animation")
 		anim.AnimationId = RUN_ANIM_ID
-
 		local track = animator:LoadAnimation(anim)
-		track.Priority = Enum.AnimationPriority.Action  -- 앉은 자세 위에 덮음
+		track.Priority = Enum.AnimationPriority.Action
 		track.Looped = true
 		track:Play()
 		track:AdjustSpeed(1)
-
 		State.RunAnim = track
 	end)
 end
 
 local function StopRunAnimation()
 	if State.RunAnim then
-		SafeCall(function()
-			State.RunAnim:Stop()
-		end)
-		SafeCall(function()
-			State.RunAnim:Destroy()
-		end)
+		SafeCall(function() State.RunAnim:Stop() end)
+		SafeCall(function() State.RunAnim:Destroy() end)
 	end
 	State.RunAnim = nil
 end
 
 -- ------------------------------------------------------------------
--- 좌석 생성/제거
+-- VehicleSeat 생성/제거
 -- ------------------------------------------------------------------
-local function CreateSeat(char, root)
+local function CreateSeat(root)
 	local seat = Instance.new("VehicleSeat")
 	seat.Name = "SpeedBypassSeat"
 	seat.Transparency = 1
 	seat.Size = Vector3.new(2, 0.2, 2)
 	seat.CanCollide = false
 	seat.CanTouch = false
-	seat.MaxSpeed = 500
-	seat.Torque = 500
-	seat.Parent = char
+	seat.MaxSpeed = State.CurrentSpeed
+	seat.Parent = workspace
 	seat.CFrame = root.CFrame * SEAT_OFFSET
-	Log("VehicleSeat 생성됨, Parent=" .. tostring(char.Name))
+	Log("VehicleSeat 생성됨, MaxSpeed=" .. State.CurrentSpeed)
 	return seat
 end
 
 local function RemoveSeat()
 	if State.Seat then
-		SafeCall(function()
-			State.Seat:Destroy()
-		end)
+		SafeCall(function() State.Seat:Destroy() end)
 	end
 	State.Seat = nil
+	Log("VehicleSeat 제거됨")
 end
 
 -- ------------------------------------------------------------------
--- 적용: 좌석 생성 후 앉히기
+-- 앉히기
+-- ------------------------------------------------------------------
+local function SitPlayer()
+	local humanoid = State.Humanoid
+	local seat = State.Seat
+	if not humanoid or not seat then return end
+
+	SafeCall(function()
+		for i = 1, 5 do
+			humanoid.Sit = true
+			task.wait(0.15)
+			Log("앉기 시도 " .. i .. "회 — Occupant=" .. tostring(seat.Occupant))
+			if seat.Occupant == humanoid then
+				Log("앉기 성공!")
+				return
+			end
+		end
+		Log("앉기 실패: 5회 모두 실패")
+	end)
+end
+
+-- ------------------------------------------------------------------
+-- 적용
 -- ------------------------------------------------------------------
 local function ApplySeat()
-	local char    = State.Character
+	local char = State.Character
 	local humanoid = State.Humanoid
-	local root    = State.Root
-	Log("ApplySeat 호출 — char=" .. tostring(char) .. " humanoid=" .. tostring(humanoid) .. " root=" .. tostring(root))
+	local root = State.Root
+	Log("ApplySeat 호출")
+
 	if not char or not humanoid or not root then
 		Log("ApplySeat 중단: char/humanoid/root 없음")
 		return
@@ -139,7 +161,7 @@ local function ApplySeat()
 	RemoveSeat()
 
 	local seat = SafeCall(function()
-		return CreateSeat(char, root)
+		return CreateSeat(root)
 	end)
 	if not seat then
 		Log("ApplySeat 중단: seat 생성 실패")
@@ -147,90 +169,62 @@ local function ApplySeat()
 	end
 
 	State.Seat = seat
-
-	-- 앉기 시도 (실패 시 좌석 재배치 후 재시도)
-	SafeCall(function()
-		for i = 1, 5 do
-			seat.CFrame = root.CFrame * SEAT_OFFSET
-			humanoid.Sit = true
-			task.wait(0.15)
-			Log("앉기 시도 " .. i .. "회 — Occupant=" .. tostring(seat.Occupant))
-			if seat.Occupant == humanoid then
-				Log("앉기 성공!")
-				break
-			end
-		end
-		if seat.Occupant ~= humanoid then
-			Log("앉기 실패: 5회 모두 실패")
-		end
-	end)
+	SitPlayer()
 end
 
 -- ------------------------------------------------------------------
--- 입력 방향: WASD + 카메라 기준 (앉은 상태에서도 동작)
+-- 입력 방향
 -- ------------------------------------------------------------------
 local function GetInputDirection()
 	local camera = workspace.CurrentCamera
 	local cf = camera and camera.CFrame or CFrame.new()
 
-	-- 카메라 Look/Right 를 지면에 투영 (기울기 무시)
 	local flatLook = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
 	local flatRight = Vector3.new(cf.RightVector.X, 0, cf.RightVector.Z)
-	if flatLook.Magnitude > 0.001 then
-		flatLook = flatLook.Unit
-	end
-	if flatRight.Magnitude > 0.001 then
-		flatRight = flatRight.Unit
-	end
+	if flatLook.Magnitude > 0.001 then flatLook = flatLook.Unit end
+	if flatRight.Magnitude > 0.001 then flatRight = flatRight.Unit end
 
 	local dir = Vector3.zero
-	if UserInputService:IsKeyDown(Enum.KeyCode.W) then
-		dir += flatLook
-	end
-	if UserInputService:IsKeyDown(Enum.KeyCode.S) then
-		dir -= flatLook
-	end
-	if UserInputService:IsKeyDown(Enum.KeyCode.D) then
-		dir += flatRight
-	end
-	if UserInputService:IsKeyDown(Enum.KeyCode.A) then
-		dir -= flatRight
-	end
-	if dir.Magnitude > 0.001 then
-		dir = dir.Unit
-	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir += flatLook end
+	if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir -= flatLook end
+	if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir += flatRight end
+	if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir -= flatRight end
+	if dir.Magnitude > 0.001 then dir = dir.Unit end
 	return dir
 end
 
 -- ------------------------------------------------------------------
--- Heartbeat 드라이버
+-- Heartbeat
 -- ------------------------------------------------------------------
 local function OnHeartbeat()
-	if not State.Enabled then
-		return
-	end
+	if not State.Enabled then return end
 
-	local char    = State.Character
+	local char = State.Character
 	local humanoid = State.Humanoid
-	local root    = State.Root
-	if not char or not humanoid or not root or not char.Parent then
-		return
-	end
+	local root = State.Root
+	if not char or not humanoid or not root or not char.Parent then return end
 
 	-- 좌석 유실 시 재생성
 	if not State.Seat or not State.Seat.Parent then
-		Log("Heartbeat: 좌석 유실, 재생성 시도")
-		SafeCall(ApplySeat)
+		Log("Heartbeat: 좌석 유실, 재생성")
+		ApplySeat()
 		return
 	end
 
-	-- 이동: 좌석에 속도 적용 (WalkSpeed 무수정)
+	local seat = State.Seat
+
+	-- 좌석을 캐릭터 발밑으로 따라붙게 (용접 없이 CFrame 동기화)
+	SafeCall(function()
+		seat.CFrame = root.CFrame * SEAT_OFFSET
+	end)
+
+	-- 이동: WASD 방향으로 속도 적용 (WalkSpeed 무수정)
 	SafeCall(function()
 		local dir = GetInputDirection()
 		if dir.Magnitude > 0.01 then
-			State.Seat.AssemblyLinearVelocity = dir * State.CurrentSpeed
+			seat.AssemblyLinearVelocity = dir * State.CurrentSpeed
 		else
-			State.Seat.AssemblyLinearVelocity = Vector3.new(0, State.Seat.AssemblyLinearVelocity.Y, 0)
+			seat.AssemblyLinearVelocity = Vector3.new(0, seat.AssemblyLinearVelocity.Y, 0)
 		end
 	end)
 
@@ -239,26 +233,21 @@ local function OnHeartbeat()
 end
 
 -- ------------------------------------------------------------------
--- 리스폰 처리
+-- 리스폰
 -- ------------------------------------------------------------------
 local function OnCharacterAdded(character)
 	State.Character = character
-	State.Root = nil
-	State.Humanoid = SafeCall(function()
-		return character:WaitForChild("Humanoid", 5)
-	end)
-	State.Root = SafeCall(function()
-		return character:WaitForChild("HumanoidRootPart", 5)
-	end)
+	State.Humanoid = SafeCall(function() return character:WaitForChild("Humanoid", 5) end)
+	State.Root = SafeCall(function() return character:WaitForChild("HumanoidRootPart", 5) end)
 
 	RemoveSeat()
 	StopRunAnimation()
 
 	if State.Enabled then
 		task.spawn(function()
-			task.wait(0.8)   -- 리그가 안정된 후 다시 앉히기
+			task.wait(0.8)
 			if State.Enabled then
-				SafeCall(ApplySeat)
+				ApplySeat()
 			end
 		end)
 	end
@@ -268,29 +257,24 @@ end
 -- 공개 인터페이스
 -- ------------------------------------------------------------------
 function SpeedBypass.Toggle(desired)
-	if desired == nil then
-		desired = not State.Enabled
-	end
-	Log("Toggle(" .. tostring(desired) .. ") 호출됨 — 현재 State.Enabled=" .. tostring(State.Enabled))
+	if desired == nil then desired = not State.Enabled end
+	Log("Toggle(" .. tostring(desired) .. ") — 현재 Enabled=" .. tostring(State.Enabled))
 
-	local ok = SafeCall(function()
+	SafeCall(function()
 		if desired then
 			State.Enabled = true
-			Log("Toggle: ApplySeat 시작")
 			ApplySeat()
-			Log("Toggle: PlayRunAnimation 시작")
 			PlayRunAnimation()
-			Log("Toggle: 활성화 완료")
+			Log("활성화 완료")
 		else
 			State.Enabled = false
 			RemoveSeat()
 			StopRunAnimation()
-			Log("Toggle: 비활성화 완료")
+			Log("비활성화 완료")
 		end
 	end)
 
-	if ok == nil then
-		State.Enabled = false
+	if not State.Enabled and desired then
 		Log("Toggle: pcall 실패로 강제 비활성화")
 	end
 
@@ -301,6 +285,11 @@ function SpeedBypass.SetSpeed(value)
 	local clamped = Clamp(value, SPEED_MIN, SPEED_MAX)
 	State.CurrentSpeed = clamped
 	Log("SetSpeed(" .. tostring(value) .. ") → " .. tostring(clamped))
+	if State.Seat and State.Seat.Parent then
+		SafeCall(function()
+			State.Seat.MaxSpeed = clamped
+		end)
+	end
 	return clamped
 end
 
@@ -317,13 +306,8 @@ function SpeedBypass.Destroy()
 	State.Enabled = false
 	RemoveSeat()
 	StopRunAnimation()
-
-	if State.ConnCharacterAdded then
-		State.ConnCharacterAdded:Disconnect()
-	end
-	if State.ConnHeartbeat then
-		State.ConnHeartbeat:Disconnect()
-	end
+	if State.ConnCharacterAdded then State.ConnCharacterAdded:Disconnect() end
+	if State.ConnHeartbeat then State.ConnHeartbeat:Disconnect() end
 	State.ConnCharacterAdded = nil
 	State.ConnHeartbeat = nil
 end
@@ -337,6 +321,7 @@ task.spawn(function()
 		OnCharacterAdded(LocalPlayer.Character)
 	end
 	State.ConnHeartbeat = RunService.Heartbeat:Connect(OnHeartbeat)
+	Log("부팅 완료 — SpeedBypass 모듈 로드됨")
 end)
 
 getgenv().SpeedBypass = SpeedBypass
