@@ -1,10 +1,13 @@
--- Improved ESP Module - Public Edition
--- Fixed: stable bounding box, no more box tearing
--- API: { Start(), Stop(), ESP = { Boxes, Health, Names, Tracers, TeamCheck, MaxDistance, etc. } }
+-- ESP Public - V2
+-- Fixed: tracer offset, box drift, team color, name color
+-- Added: health bar position & thickness control
+-- API: { Start(), Stop(), ESP = { ... } }
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local GuiService = game:GetService("GuiService")
 local LocalPlayer = Players.LocalPlayer
+local mouse = LocalPlayer:GetMouse()
 
 local ESP = {
     State = false,
@@ -20,15 +23,20 @@ local ESP = {
     TracerColor = Color3.fromRGB(255, 60, 60),
     TracerThickness = 1,
     BoxThickness = 1,
-    TracerOrigin = "Bottom", -- "Bottom", "Middle" or "Mouse"
+    TracerOrigin = "Bottom",
+    HealthBarPosition = "Top",    -- "Top" or "Bottom"
+    HealthBarThickness = 4,
 }
 
-local ESP_Data = {}
 local ESP_UI = {}
 local ESP_Connections = {}
 local ESP_Render
-local mouse = LocalPlayer:GetMouse()
-local camera = workspace.CurrentCamera
+
+-- Character parts used for stable 2D bounding box
+local TRACK_PARTS = {
+    "Head", "HumanoidRootPart", "Torso", "UpperTorso",
+    "LowerTorso", "LeftFoot", "RightFoot", "LeftHand", "RightHand",
+}
 
 local function MakeUI()
     return {
@@ -43,84 +51,63 @@ local function MakeUI()
     }
 end
 
-local function InitDraw(d)
-    d.Visible = false
-    d.Thickness = 1
-end
-
 local function SetupUI(ui)
-    InitDraw(ui.box)
     ui.box.Filled = false
-    ui.box.Color = ESP.BoxColor
+    ui.box.Thickness = 1
+    ui.box.Visible = false
 
-    InitDraw(ui.boxOutline)
     ui.boxOutline.Filled = false
     ui.boxOutline.Color = Color3.fromRGB(0, 0, 0)
-    ui.boxOutline.Thickness = ESP.BoxThickness * 2
+    ui.boxOutline.Thickness = 1
+    ui.boxOutline.Visible = false
 
-    InitDraw(ui.tracer)
-    ui.tracer.Color = ESP.TracerColor
+    ui.tracer.Thickness = 1
+    ui.tracer.Visible = false
 
-    InitDraw(ui.tracerOutline)
     ui.tracerOutline.Color = Color3.fromRGB(0, 0, 0)
-    ui.tracerOutline.Thickness = ESP.TracerThickness * 2
+    ui.tracerOutline.Thickness = 1
+    ui.tracerOutline.Visible = false
 
-    InitDraw(ui.healthBg)
     ui.healthBg.Filled = true
     ui.healthBg.Color = Color3.fromRGB(30, 30, 30)
+    ui.healthBg.Visible = false
 
-    InitDraw(ui.healthBar)
     ui.healthBar.Filled = true
+    ui.healthBar.Visible = false
 
     ui.name.Center = true
     ui.name.Outline = true
     ui.name.Size = 13
-    ui.name.Color = Color3.fromRGB(255, 255, 255)
+    ui.name.Visible = false
 
     ui.dist.Center = true
     ui.dist.Outline = true
     ui.dist.Size = 12
-    ui.dist.Color = Color3.fromRGB(200, 200, 200)
+    ui.dist.Visible = false
 end
 
-local function GetBoundingBox2D(character)
-    -- Get all visible parts, project their corners to screen, return min/max X,Y
+local function PartsBoundingBox2D(char, camera)
     local minX, maxX = math.huge, -math.huge
     local minY, maxY = math.huge, -math.huge
     local anyOnScreen = false
 
-    -- Use GetBoundingBox for stable CFrame + Size
-    local success, cframe, size = pcall(function()
-        return character:GetBoundingBox()
-    end)
-
-    if success and cframe and size then
-        local sx, sy, sz = size.X / 2, size.Y / 2, size.Z / 2
-        local corners = {
-            Vector3.new(-sx, -sy, -sz), Vector3.new(sx, -sy, -sz),
-            Vector3.new(-sx, sy, -sz),  Vector3.new(sx, sy, -sz),
-            Vector3.new(-sx, -sy, sz),  Vector3.new(sx, -sy, sz),
-            Vector3.new(-sx, sy, sz),   Vector3.new(sx, sy, sz),
-        }
-        for _, offset in ipairs(corners) do
-            local worldPos = cframe * offset
-            local screenPos, onScreen = camera:WorldToViewportPoint(worldPos)
+    for _, partName in ipairs(TRACK_PARTS) do
+        local part = char:FindFirstChild(partName)
+        if part and part:IsA("BasePart") then
+            local pos, onScreen = camera:WorldToViewportPoint(part.Position)
             if onScreen then
                 anyOnScreen = true
-                if screenPos.X < minX then minX = screenPos.X end
-                if screenPos.X > maxX then maxX = screenPos.X end
-                if screenPos.Y < minY then minY = screenPos.Y end
-                if screenPos.Y > maxY then maxY = screenPos.Y end
+                if pos.X < minX then minX = pos.X end
+                if pos.X > maxX then maxX = pos.X end
+                if pos.Y < minY then minY = pos.Y end
+                if pos.Y > maxY then maxY = pos.Y end
             end
         end
     end
 
-    if not anyOnScreen then
-        return nil
-    end
+    if not anyOnScreen then return nil end
 
-    -- Add padding so box doesn't clip
-    local pad = 2
+    local pad = 4
     return {
         X = minX - pad,
         Y = minY - pad,
@@ -129,13 +116,13 @@ local function GetBoundingBox2D(character)
     }
 end
 
-local function GetColor(character)
-    local plr = Players:GetPlayerFromCharacter(character)
-    if not plr then
-        return Color3.fromRGB(255, 170, 0) -- NPC
-    end
-    if ESP.TeamCheck and plr.TeamColor ~= LocalPlayer.TeamColor then
-        return Color3.fromRGB(255, 60, 60)
+local function GetTeamColor(plr)
+    if ESP.TeamCheck then
+        if plr.TeamColor == LocalPlayer.TeamColor then
+            return Color3.fromRGB(0, 255, 0) -- same team = green
+        else
+            return Color3.fromRGB(255, 60, 60) -- enemy = red
+        end
     end
     if ESP.TeamColor then
         return plr.TeamColor.Color
@@ -172,9 +159,10 @@ local function Start()
     table.insert(ESP_Connections, Players.PlayerRemoving:Connect(Unregister))
 
     ESP_Render = RunService.RenderStepped:Connect(function()
-        camera = workspace.CurrentCamera
+        local camera = workspace.CurrentCamera
         if not camera then return end
         local viewport = camera.ViewportSize
+        local inset = GuiService:GetGuiInset()
 
         for plr, ui in pairs(ESP_UI) do
             local char = plr.Character
@@ -197,10 +185,10 @@ local function Start()
                 continue
             end
 
-            -- Get stable 2D bounding box
-            local bb = GetBoundingBox2D(char)
+            -- Stable bounding box from tracked parts
+            local bb = PartsBoundingBox2D(char, camera)
             if not bb then
-                -- Fallback: use root position with distance-based size
+                -- Fallback
                 local h = math.clamp(1000 / dist * 80, 30, 320)
                 local w = h * 0.6
                 bb = {
@@ -211,19 +199,16 @@ local function Start()
                 }
             end
 
-            -- 폭이 과하게 넓어지는 것 방지 (팔 벌림 등): 높이 기반으로 폭 제한
-            bb.Width = math.min(bb.Width, bb.Height * 0.65)
-
-            local color = GetColor(char)
+            local color = plr.TeamColor and GetTeamColor(plr) or ESP.BoxColor
             local boxThick = ESP.BoxThickness
             local tracerThick = ESP.TracerThickness
+            local hpThick = ESP.HealthBarThickness
 
-            -- Box (with outline)
+            -- Box
             if ESP.Boxes then
                 ui.boxOutline.Position = Vector2.new(bb.X - 1, bb.Y - 1)
                 ui.boxOutline.Size = Vector2.new(bb.Width + 2, bb.Height + 2)
                 ui.boxOutline.Thickness = boxThick + 2
-                ui.boxOutline.Color = Color3.fromRGB(0, 0, 0)
                 ui.boxOutline.Visible = true
 
                 ui.box.Position = Vector2.new(bb.X, bb.Y)
@@ -241,14 +226,20 @@ local function Start()
                 local maxhp = hum.MaxHealth
                 local hpRatio = maxhp > 0 and math.clamp(hum.Health / maxhp, 0, 1) or 0
                 local barWidth = bb.Width
-                local barHeight = 4
 
-                ui.healthBg.Position = Vector2.new(bb.X, bb.Y - barHeight - 2)
-                ui.healthBg.Size = Vector2.new(barWidth, barHeight)
+                local hpY
+                if ESP.HealthBarPosition == "Top" then
+                    hpY = bb.Y - hpThick - 2
+                else
+                    hpY = bb.Y + bb.Height + 2
+                end
+
+                ui.healthBg.Position = Vector2.new(bb.X, hpY)
+                ui.healthBg.Size = Vector2.new(barWidth, hpThick)
                 ui.healthBg.Visible = true
 
-                ui.healthBar.Position = Vector2.new(bb.X, bb.Y - barHeight - 2)
-                ui.healthBar.Size = Vector2.new(barWidth * hpRatio, barHeight)
+                ui.healthBar.Position = Vector2.new(bb.X, hpY)
+                ui.healthBar.Size = Vector2.new(barWidth * hpRatio, hpThick)
                 ui.healthBar.Color = hpRatio > 0.5 and Color3.fromRGB(0, 240, 0)
                     or (hpRatio > 0.25 and Color3.fromRGB(255, 200, 0) or Color3.fromRGB(255, 40, 40))
                 ui.healthBar.Visible = true
@@ -260,6 +251,7 @@ local function Start()
             -- Name
             if ESP.Names then
                 ui.name.Text = plr.Name
+                ui.name.Color = color
                 ui.name.Position = Vector2.new(rootPos.X, bb.Y - 18)
                 ui.name.Visible = true
             else
@@ -275,23 +267,22 @@ local function Start()
                 ui.dist.Visible = false
             end
 
-            -- Tracer (with outline)
+            -- Tracer
             if ESP.Tracers then
                 local origin
                 if ESP.TracerOrigin == "Mouse" then
-                    origin = Vector2.new(mouse.X, mouse.Y)
+                    origin = Vector2.new(mouse.X, mouse.Y - inset.Y)
                 elseif ESP.TracerOrigin == "Middle" then
-                    origin = viewport * 0.5
-                else -- Bottom
-                    origin = Vector2.new(viewport.X * 0.5, viewport.Y)
+                    origin = Vector2.new(viewport.X / 2, viewport.Y / 2)
+                else
+                    origin = Vector2.new(viewport.X / 2, viewport.Y)
                 end
 
-                local target = Vector2.new(rootPos.X, bb.Y + bb.Height)
+                local target = Vector2.new(rootPos.X, bb.Y + bb.Height / 2)
 
                 ui.tracerOutline.From = origin
                 ui.tracerOutline.To = target
                 ui.tracerOutline.Thickness = tracerThick + 2
-                ui.tracerOutline.Color = Color3.fromRGB(0, 0, 0)
                 ui.tracerOutline.Visible = true
 
                 ui.tracer.From = origin
