@@ -806,17 +806,18 @@ getgenv().loaded = true
         
             task.spawn(function()
                 task.wait(3)
-                
+
                 notifications.notifs[index] = nil
-        
+
                 notifications:fade(outline, true)
-        
+
                 task.wait(3)
-        
-                outline:Destroy() 
+
+                outline:Destroy()
             end)
         end
-        
+        library.notifications = notifications
+
         function library:watermark(options)
             local cfg = {
                 name = options.name or "nebulahax";
