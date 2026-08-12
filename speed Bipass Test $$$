@@ -3,7 +3,7 @@
 		HumanoidRootPart 에 BodyVelocity 부착, 매 프레임 WASD 입력
 		방향 + 목표 속도로 Velocity 설정. WalkSpeed 는 절대 건드리지
 		않아 값 기반 서버 감지를 우회(솔직히 큰 의미는 없긴 함) BodyVelocity 는 클라이언트
-		측 인스턴스라 서버가 직접 관찰 불가. R6/R15 공용. (애니메이션 코드는 수정 해야함. <- R15)
+		R6/R15 공용. (애니메이션 코드는 수정 해야함. <- R15)
 
 	인터페이스 (전역 `SpeedBypass`)
 		Toggle(boolean?) -> boolean
