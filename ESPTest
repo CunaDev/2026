@@ -1,5 +1,4 @@
--- ESP Public - Simple 2D Box ESP (Module)
--- Base: Simple 2D box from ESP file
+-- ESP Public - Simple 2D Box ESP (based on ESP file)
 -- API: { Start(), Stop(), ESP = { ... } }
 
 local runService = game:GetService("RunService")
@@ -8,298 +7,296 @@ local localPlayer = players.LocalPlayer
 local camera = workspace.CurrentCamera
 
 local ESP = {
-    State = false,
-    Boxes = true,
-    Tracers = false,
-    Names = true,
-    Distance = true,
-    Health = true,
-    TeamCheck = false,      -- true = hide same team
-    TeamColor = true,       -- color by team
-    MaxDistance = 500,
-    BoxColor = Color3.fromRGB(255, 0, 0),
-    TracerColor = Color3.fromRGB(255, 0, 0),
-    BoxThickness = 1,
-    TracerThickness = 1,
-    HealthBarPosition = "Left", -- "Left", "Right", "Top", "Bottom"
+   State = false,
+   Boxes = true,
+   Tracers = false,
+   Names = true,
+   Distance = true,
+   Health = true,
+   TeamCheck = false,
+   TeamColor = true,
+   MaxDistance = 500,
+   BoxColor = Color3.fromRGB(255,0,0),
+   TracerColor = Color3.fromRGB(255,0,0),
+   BoxThickness = 1,
+   TracerThickness = 1,
+   HealthBarPosition = "Left",
 }
 
 local espCache = {}
+local tan, rad = math.tan, math.rad
+local wtvp = function(pos)
+   local a, b, c = camera:WorldToViewportPoint(pos)
+   return Vector2.new(a.X, a.Y), b, c
+end
 
 local function createEsp(player)
-    local d = {}
+   local drawings = {}
 
-    d.box = Drawing.new("Square")
-    d.box.Thickness = ESP.BoxThickness
-    d.box.Filled = false
-    d.box.Color = ESP.BoxColor
-    d.box.Visible = false
+   drawings.box = Drawing.new("Square")
+   drawings.box.Thickness = ESP.BoxThickness
+   drawings.box.Filled = false
+   drawings.box.Color = ESP.BoxColor
+   drawings.box.Visible = false
 
-    d.boxOutline = Drawing.new("Square")
-    d.boxOutline.Thickness = ESP.BoxThickness + 2
-    d.boxOutline.Filled = false
-    d.boxOutline.Color = Color3.fromRGB(0, 0, 0)
-    d.boxOutline.Visible = false
+   drawings.boxoutline = Drawing.new("Square")
+   drawings.boxoutline.Thickness = 3
+   drawings.boxoutline.Filled = false
+   drawings.boxoutline.Color = Color3.new()
+   drawings.boxoutline.Visible = false
 
-    d.tracer = Drawing.new("Line")
-    d.tracer.Thickness = ESP.TracerThickness
-    d.tracer.Color = ESP.TracerColor
-    d.tracer.Visible = false
+   drawings.tracer = Drawing.new("Line")
+   drawings.tracer.Thickness = ESP.TracerThickness
+   drawings.tracer.Color = ESP.TracerColor
+   drawings.tracer.Visible = false
 
-    d.tracerOutline = Drawing.new("Line")
-    d.tracerOutline.Thickness = ESP.TracerThickness + 2
-    d.tracerOutline.Color = Color3.fromRGB(0, 0, 0)
-    d.tracerOutline.Visible = false
+   drawings.traceroutline = Drawing.new("Line")
+   drawings.traceroutline.Thickness = ESP.TracerThickness + 2
+   drawings.traceroutline.Color = Color3.new()
+   drawings.traceroutline.Visible = false
 
-    d.healthBg = Drawing.new("Line")
-    d.healthBg.Thickness = 3
-    d.healthBg.Color = Color3.fromRGB(30, 30, 30)
-    d.healthBg.Visible = false
+   drawings.healthbg = Drawing.new("Line")
+   drawings.healthbg.Thickness = 3
+   drawings.healthbg.Color = Color3.fromRGB(30,30,30)
+   drawings.healthbg.Visible = false
 
-    d.healthFill = Drawing.new("Line")
-    d.healthFill.Thickness = 2
-    d.healthFill.Color = Color3.fromRGB(0, 255, 0)
-    d.healthFill.Visible = false
+   drawings.healthfill = Drawing.new("Line")
+   drawings.healthfill.Thickness = 2
+   drawings.healthfill.Color = Color3.fromRGB(0,255,0)
+   drawings.healthfill.Visible = false
 
-    d.name = Drawing.new("Text")
-    d.name.Center = true
-    d.name.Outline = true
-    d.name.Size = 13
-    d.name.Color = Color3.fromRGB(255, 255, 255)
-    d.name.Visible = false
+   drawings.nametag = Drawing.new("Text")
+   drawings.nametag.Center = true
+   drawings.nametag.Outline = true
+   drawings.nametag.Size = 13
+   drawings.nametag.Color = Color3.fromRGB(255,255,255)
+   drawings.nametag.Visible = false
 
-    d.dist = Drawing.new("Text")
-    d.dist.Center = true
-    d.dist.Outline = true
-    d.dist.Size = 12
-    d.dist.Color = Color3.fromRGB(200, 200, 200)
-    d.dist.Visible = false
+   drawings.disttag = Drawing.new("Text")
+   drawings.disttag.Center = true
+   drawings.disttag.Outline = true
+   drawings.disttag.Size = 12
+   drawings.disttag.Color = Color3.fromRGB(200,200,200)
+   drawings.disttag.Visible = false
 
-    espCache[player] = d
+   espCache[player] = drawings
 end
 
 local function removeEsp(player)
-    if espCache[player] then
-        for _, drawing in next, espCache[player] do
-            drawing:Remove()
-        end
-        espCache[player] = nil
-    end
+   if espCache[player] then
+       for _, drawing in next, espCache[player] do
+           drawing:Remove()
+       end
+       espCache[player] = nil
+   end
 end
 
-local function updateEsp(player, d)
-    local char = player.Character
-    if not char then
-        d.box.Visible = false
-        d.boxOutline.Visible = false
-        d.tracer.Visible = false
-        d.tracerOutline.Visible = false
-        d.healthBg.Visible = false
-        d.healthFill.Visible = false
-        d.name.Visible = false
-        d.dist.Visible = false
-        return
-    end
+local function updateEsp(player, esp)
+   local character = player and player.Character
+   local hum = character and character:FindFirstChildOfClass("Humanoid")
+   local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+   local head = character and character:FindFirstChild("Head")
 
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    local root = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
-    local head = char:FindFirstChild("Head")
-    if not hum or not root or not head or hum.Health <= 0 then
-        d.box.Visible = false
-        d.boxOutline.Visible = false
-        d.tracer.Visible = false
-        d.tracerOutline.Visible = false
-        d.healthBg.Visible = false
-        d.healthFill.Visible = false
-        d.name.Visible = false
-        d.dist.Visible = false
-        return
-    end
+   if not character or not hum or not root or not head or hum.Health <= 0 then
+      esp.box.Visible = false
+      esp.boxoutline.Visible = false
+      esp.tracer.Visible = false
+      esp.traceroutline.Visible = false
+      esp.healthbg.Visible = false
+      esp.healthfill.Visible = false
+      esp.nametag.Visible = false
+      esp.disttag.Visible = false
+      return
+   end
 
-    local dist = (root.Position - camera.CFrame.Position).Magnitude
-    if dist > ESP.MaxDistance then
-        d.box.Visible = false
-        d.boxOutline.Visible = false
-        d.tracer.Visible = false
-        d.tracerOutline.Visible = false
-        d.healthBg.Visible = false
-        d.healthFill.Visible = false
-        d.name.Visible = false
-        d.dist.Visible = false
-        return
-    end
+   local dist = (root.Position - camera.CFrame.Position).Magnitude
+   if dist > ESP.MaxDistance then
+      esp.box.Visible = false
+      esp.boxoutline.Visible = false
+      esp.tracer.Visible = false
+      esp.traceroutline.Visible = false
+      esp.healthbg.Visible = false
+      esp.healthfill.Visible = false
+      esp.nametag.Visible = false
+      esp.disttag.Visible = false
+      return
+   end
 
-    local cf = root.CFrame
-    local scale = head.Size.Y
-    local sx = 0.9 * scale
-    local sy = 2.0 * scale
+   local cframe = character:GetModelCFrame()
+   local position, visible, depth = wtvp(cframe.Position)
+   local color = ESP.TeamColor and player.TeamColor.Color or ESP.BoxColor
 
-    local TL, TLon, TLz = camera:WorldToViewportPoint((cf * CFrame.new(-sx, sy, 0)).Position)
-    local TR, TRon = camera:WorldToViewportPoint((cf * CFrame.new(sx, sy, 0)).Position)
-    local BR, BRon = camera:WorldToViewportPoint((cf * CFrame.new(sx, -sy, 0)).Position)
-    local BL, BLon = camera:WorldToViewportPoint((cf * CFrame.new(-sx, -sy, 0)).Position)
+   esp.box.Thickness = ESP.BoxThickness
+   esp.boxoutline.Thickness = ESP.BoxThickness + 2
+   esp.tracer.Thickness = ESP.TracerThickness
+   esp.traceroutline.Thickness = ESP.TracerThickness + 2
 
-    local visible = TLon and TRon and BRon and BLon and TLz > 0
-    local color = ESP.TeamColor and player.TeamColor.Color or ESP.BoxColor
+   if cframe and visible then
+      local scaleFactor = 1 / (depth * tan(rad(camera.FieldOfView / 2)) * 2) * 1000
+      local width, height = 4 * scaleFactor, 5 * scaleFactor
+      local x, y = position.X, position.Y
 
-    d.box.Thickness = ESP.BoxThickness
-    d.boxOutline.Thickness = ESP.BoxThickness + 2
-    d.tracer.Thickness = ESP.TracerThickness
-    d.tracerOutline.Thickness = ESP.TracerThickness + 2
+      -- Box
+      if ESP.Boxes then
+         esp.box.Size = Vector2.new(width, height)
+         esp.box.Position = Vector2.new(x - width / 2, y - height / 2)
+         esp.box.Color = color
+         esp.box.Visible = true
 
-    -- Box
-    if ESP.Boxes and visible then
-        d.box.Size = Vector2.new(TR.X - TL.X, BL.Y - TL.Y)
-        d.box.Position = Vector2.new(TL.X, TL.Y)
-        d.box.Color = color
-        d.box.Visible = true
+         esp.boxoutline.Size = esp.box.Size
+         esp.boxoutline.Position = esp.box.Position
+         esp.boxoutline.Visible = true
+      else
+         esp.box.Visible = false
+         esp.boxoutline.Visible = false
+      end
 
-        d.boxOutline.Size = d.box.Size
-        d.boxOutline.Position = Vector2.new(TL.X - 1, TL.Y - 1)
-        d.boxOutline.Visible = true
-    else
-        d.box.Visible = false
-        d.boxOutline.Visible = false
-    end
+      -- Health bar
+      if ESP.Health then
+         local hpRatio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+         local hpColor = Color3.fromRGB(0,255,0):Lerp(Color3.fromRGB(255,0,0), 1 - hpRatio)
+         local gap = 4
 
-    -- Health bar
-    if ESP.Health and visible then
-        local hpRatio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-        local hpColor = Color3.fromRGB(0, 255, 0):Lerp(Color3.fromRGB(255, 0, 0), 1 - hpRatio)
-        local gap = 5
-        local boxW = TR.X - TL.X
-        local boxH = BL.Y - TL.Y
+         if ESP.HealthBarPosition == "Left" then
+            local bx = x - width / 2 - gap
+            esp.healthbg.From = Vector2.new(bx, y + height / 2)
+            esp.healthbg.To = Vector2.new(bx, y - height / 2)
+            esp.healthfill.From = Vector2.new(bx, y + height / 2)
+            esp.healthfill.To = Vector2.new(bx, y + height / 2 - height * hpRatio)
+         elseif ESP.HealthBarPosition == "Right" then
+            local bx = x + width / 2 + gap
+            esp.healthbg.From = Vector2.new(bx, y + height / 2)
+            esp.healthbg.To = Vector2.new(bx, y - height / 2)
+            esp.healthfill.From = Vector2.new(bx, y + height / 2)
+            esp.healthfill.To = Vector2.new(bx, y + height / 2 - height * hpRatio)
+         elseif ESP.HealthBarPosition == "Top" then
+            local by = y - height / 2 - gap
+            esp.healthbg.From = Vector2.new(x - width / 2, by)
+            esp.healthbg.To = Vector2.new(x + width / 2, by)
+            esp.healthfill.From = Vector2.new(x - width / 2, by)
+            esp.healthfill.To = Vector2.new(x - width / 2 + width * hpRatio, by)
+         else -- Bottom
+            local by = y + height / 2 + gap
+            esp.healthbg.From = Vector2.new(x - width / 2, by)
+            esp.healthbg.To = Vector2.new(x + width / 2, by)
+            esp.healthfill.From = Vector2.new(x - width / 2, by)
+            esp.healthfill.To = Vector2.new(x - width / 2 + width * hpRatio, by)
+         end
 
-        if ESP.HealthBarPosition == "Left" then
-            local bx = TL.X - gap
-            d.healthBg.From = Vector2.new(bx, BL.Y)
-            d.healthBg.To = Vector2.new(bx, TL.Y)
-            d.healthFill.From = Vector2.new(bx, BL.Y)
-            d.healthFill.To = Vector2.new(bx, BL.Y - boxH * hpRatio)
-        elseif ESP.HealthBarPosition == "Right" then
-            local bx = TR.X + gap
-            d.healthBg.From = Vector2.new(bx, BR.Y)
-            d.healthBg.To = Vector2.new(bx, TR.Y)
-            d.healthFill.From = Vector2.new(bx, BR.Y)
-            d.healthFill.To = Vector2.new(bx, BR.Y - boxH * hpRatio)
-        elseif ESP.HealthBarPosition == "Top" then
-            local by = TL.Y - gap
-            d.healthBg.From = Vector2.new(TL.X, by)
-            d.healthBg.To = Vector2.new(TR.X, by)
-            d.healthFill.From = Vector2.new(TL.X, by)
-            d.healthFill.To = Vector2.new(TL.X + boxW * hpRatio, by)
-        else -- Bottom
-            local by = BL.Y + gap
-            d.healthBg.From = Vector2.new(BL.X, by)
-            d.healthBg.To = Vector2.new(BR.X, by)
-            d.healthFill.From = Vector2.new(BL.X, by)
-            d.healthFill.To = Vector2.new(BL.X + boxW * hpRatio, by)
-        end
+         esp.healthbg.Visible = true
+         esp.healthfill.Color = hpColor
+         esp.healthfill.Visible = true
+      else
+         esp.healthbg.Visible = false
+         esp.healthfill.Visible = false
+      end
 
-        d.healthBg.Visible = true
-        d.healthFill.Color = hpColor
-        d.healthFill.Visible = true
-    else
-        d.healthBg.Visible = false
-        d.healthFill.Visible = false
-    end
+      -- Nametag
+      if ESP.Names then
+         esp.nametag.Text = player.Name
+         esp.nametag.Color = color
+         esp.nametag.Position = Vector2.new(x, y - height / 2 - 14)
+         esp.nametag.Visible = true
+      else
+         esp.nametag.Visible = false
+      end
 
-    -- Name
-    if ESP.Names and visible then
-        d.name.Text = player.Name
-        d.name.Color = color
-        d.name.Position = Vector2.new((TL.X + TR.X) / 2, TL.Y - 14)
-        d.name.Visible = true
-    else
-        d.name.Visible = false
-    end
-
-    -- Distance + Health text
-    if ESP.Distance and visible then
-        local text = math.floor(dist) .. "s"
-        if ESP.Health then
+      -- Distance + Health text
+      if ESP.Distance then
+         local text = math.floor(dist) .. "s"
+         if ESP.Health then
             text = text .. " | " .. math.floor(hum.Health) .. "hp"
-        end
-        d.dist.Text = text
-        d.dist.Position = Vector2.new((BL.X + BR.X) / 2, BL.Y + 4)
-        d.dist.Visible = true
-    else
-        d.dist.Visible = false
-    end
+         end
+         esp.disttag.Text = text
+         esp.disttag.Position = Vector2.new(x, y + height / 2 + 4)
+         esp.disttag.Visible = true
+      else
+         esp.disttag.Visible = false
+      end
 
-    -- Tracer
-    if ESP.Tracers and visible then
-        local origin = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y)
-        local target = Vector2.new((BL.X + BR.X) / 2, (BL.Y + BR.Y) / 2)
+      -- Tracer
+      if ESP.Tracers then
+         local origin = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y)
+         local target = Vector2.new(x, y + height / 2)
 
-        d.tracerOutline.From = origin
-        d.tracerOutline.To = target
-        d.tracerOutline.Visible = true
+         esp.traceroutline.From = origin
+         esp.traceroutline.To = target
+         esp.traceroutline.Visible = true
 
-        d.tracer.From = origin
-        d.tracer.To = target
-        d.tracer.Color = color
-        d.tracer.Visible = true
-    else
-        d.tracer.Visible = false
-        d.tracerOutline.Visible = false
-    end
+         esp.tracer.From = origin
+         esp.tracer.To = target
+         esp.tracer.Color = color
+         esp.tracer.Visible = true
+      else
+         esp.tracer.Visible = false
+         esp.traceroutline.Visible = false
+      end
+   else
+      esp.box.Visible = false
+      esp.boxoutline.Visible = false
+      esp.tracer.Visible = false
+      esp.traceroutline.Visible = false
+      esp.healthbg.Visible = false
+      esp.healthfill.Visible = false
+      esp.nametag.Visible = false
+      esp.disttag.Visible = false
+   end
 end
 
 local function Start()
-    if ESP.State then return end
-    ESP.State = true
+   if ESP.State then return end
+   ESP.State = true
 
-    for _, player in next, players:GetPlayers() do
-        if player ~= localPlayer then
-            createEsp(player)
-        end
-    end
+   for _, player in next, players:GetPlayers() do
+      if player ~= localPlayer then
+         createEsp(player)
+      end
+   end
 
-    players.PlayerAdded:Connect(function(player)
-        createEsp(player)
-    end)
+   players.PlayerAdded:Connect(function(player)
+      createEsp(player)
+   end)
 
-    players.PlayerRemoving:Connect(function(player)
-        removeEsp(player)
-    end)
+   players.PlayerRemoving:Connect(function(player)
+      removeEsp(player)
+   end)
 
-    runService:BindToRenderStep("ESP_PUBLIC", Enum.RenderPriority.Camera.Value, function()
-        if camera.Parent ~= workspace then
-            camera = workspace.CurrentCamera
-        end
+   runService:BindToRenderStep("esp", Enum.RenderPriority.Camera.Value, function()
+      if camera.Parent ~= workspace then
+         camera = workspace.CurrentCamera
+      end
 
-        for player, drawings in next, espCache do
-            if ESP.TeamCheck and player.TeamColor == localPlayer.TeamColor then
-                drawings.box.Visible = false
-                drawings.boxOutline.Visible = false
-                drawings.tracer.Visible = false
-                drawings.tracerOutline.Visible = false
-                drawings.healthBg.Visible = false
-                drawings.healthFill.Visible = false
-                drawings.name.Visible = false
-                drawings.dist.Visible = false
-                continue
-            end
+      for player, drawings in next, espCache do
+         if ESP.TeamCheck and player.TeamColor == localPlayer.TeamColor then
+            drawings.box.Visible = false
+            drawings.boxoutline.Visible = false
+            drawings.tracer.Visible = false
+            drawings.traceroutline.Visible = false
+            drawings.healthbg.Visible = false
+            drawings.healthfill.Visible = false
+            drawings.nametag.Visible = false
+            drawings.disttag.Visible = false
+            continue
+         end
 
-            if drawings and player ~= localPlayer then
-                updateEsp(player, drawings)
-            end
-        end
-    end)
+         if drawings and player ~= localPlayer then
+            updateEsp(player, drawings)
+         end
+      end
+   end)
 end
 
 local function Stop()
-    if not ESP.State then return end
-    ESP.State = false
-    runService:UnbindFromRenderStep("ESP_PUBLIC")
-    for player in next, espCache do
-        removeEsp(player)
-    end
+   if not ESP.State then return end
+   ESP.State = false
+   runService:UnbindFromRenderStep("esp")
+   for player in next, espCache do
+      removeEsp(player)
+   end
 end
 
 return {
-    Start = Start,
-    Stop = Stop,
-    ESP = ESP,
+   Start = Start,
+   Stop = Stop,
+   ESP = ESP,
 }
