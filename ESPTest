@@ -1,7 +1,6 @@
-
--- ESP Module - All in One
--- 올인원 ESP 모듈. loadstring으로 불러와서 사용.
--- 제작: V.I.I.B.E
+-- Improved ESP Module - Public Edition
+-- Fixed: stable bounding box, no more box tearing
+-- API: { Start(), Stop(), ESP = { Boxes, Health, Names, Tracers, TeamCheck, MaxDistance, etc. } }
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -13,99 +12,152 @@ local ESP = {
     Health = true,
     Names = true,
     Distance = false,
-    Tracers = false,
+    Tracers = true,
     TeamCheck = true,
+    TeamColor = true,
     MaxDistance = 500,
-    IncludeNPCs = false,
+    BoxColor = Color3.fromRGB(255, 60, 60),
+    TracerColor = Color3.fromRGB(255, 60, 60),
+    TracerThickness = 1,
+    BoxThickness = 1,
+    TracerOrigin = "Bottom", -- "Bottom" or "Middle"
+    TracerFollowMouse = false,
 }
 
 local ESP_Data = {}
 local ESP_UI = {}
 local ESP_Connections = {}
 local ESP_Render
-local ESP_NPCScan
-local ESP_ScanTick = 0
+local mouse = LocalPlayer:GetMouse()
+local camera = workspace.CurrentCamera
 
-local function MakeUI(character)
-    local ui = {
+local function MakeUI()
+    return {
         box = Drawing.new("Square"),
-        hpbg = Drawing.new("Square"),
-        hp = Drawing.new("Square"),
+        boxOutline = Drawing.new("Square"),
         name = Drawing.new("Text"),
         dist = Drawing.new("Text"),
+        healthBg = Drawing.new("Square"),
+        healthBar = Drawing.new("Square"),
         tracer = Drawing.new("Line"),
+        tracerOutline = Drawing.new("Line"),
     }
-    for _, d in pairs(ui) do
-        d.Visible = false
-        d.Thickness = 1
-    end
+end
+
+local function InitDraw(d)
+    d.Visible = false
+    d.Thickness = 1
+end
+
+local function SetupUI(ui)
+    InitDraw(ui.box)
     ui.box.Filled = false
-    ui.hpbg.Filled = true
-    ui.hp.Filled = true
+    ui.box.Color = ESP.BoxColor
+
+    InitDraw(ui.boxOutline)
+    ui.boxOutline.Filled = false
+    ui.boxOutline.Color = Color3.fromRGB(0, 0, 0)
+    ui.boxOutline.Thickness = ESP.BoxThickness * 2 + 2
+
+    InitDraw(ui.tracer)
+    ui.tracer.Color = ESP.TracerColor
+
+    InitDraw(ui.tracerOutline)
+    ui.tracerOutline.Color = Color3.fromRGB(0, 0, 0)
+    ui.tracerOutline.Thickness = ESP.TracerThickness * 2 + 2
+
+    InitDraw(ui.healthBg)
+    ui.healthBg.Filled = true
+    ui.healthBg.Color = Color3.fromRGB(30, 30, 30)
+
+    InitDraw(ui.healthBar)
+    ui.healthBar.Filled = true
+
     ui.name.Center = true
     ui.name.Outline = true
     ui.name.Size = 13
+    ui.name.Color = Color3.fromRGB(255, 255, 255)
+
     ui.dist.Center = true
     ui.dist.Outline = true
     ui.dist.Size = 12
-    ESP_UI[character] = ui
+    ui.dist.Color = Color3.fromRGB(200, 200, 200)
 end
 
-local function RemoveUI(character)
-    local ui = ESP_UI[character]
+local function GetBoundingBox2D(character)
+    -- Get all visible parts, project their corners to screen, return min/max X,Y
+    local minX, maxX = math.huge, -math.huge
+    local minY, maxY = math.huge, -math.huge
+    local anyOnScreen = false
+
+    -- Use GetBoundingBox for stable CFrame + Size
+    local success, cframe, size = pcall(function()
+        return character:GetBoundingBox()
+    end)
+
+    if success and cframe and size then
+        local sx, sy, sz = size.X / 2, size.Y / 2, size.Z / 2
+        local corners = {
+            Vector3.new(-sx, -sy, -sz), Vector3.new(sx, -sy, -sz),
+            Vector3.new(-sx, sy, -sz),  Vector3.new(sx, sy, -sz),
+            Vector3.new(-sx, -sy, sz),  Vector3.new(sx, -sy, sz),
+            Vector3.new(-sx, sy, sz),   Vector3.new(sx, sy, sz),
+        }
+        for _, offset in ipairs(corners) do
+            local worldPos = cframe * offset
+            local screenPos, onScreen = camera:WorldToViewportPoint(worldPos)
+            if onScreen then
+                anyOnScreen = true
+                if screenPos.X < minX then minX = screenPos.X end
+                if screenPos.X > maxX then maxX = screenPos.X end
+                if screenPos.Y < minY then minY = screenPos.Y end
+                if screenPos.Y > maxY then maxY = screenPos.Y end
+            end
+        end
+    end
+
+    if not anyOnScreen then
+        return nil
+    end
+
+    -- Add padding so box doesn't clip
+    local pad = 2
+    return {
+        X = minX - pad,
+        Y = minY - pad,
+        Width = maxX - minX + pad * 2,
+        Height = maxY - minY + pad * 2,
+    }
+end
+
+local function GetColor(character)
+    local plr = Players:GetPlayerFromCharacter(character)
+    if not plr then
+        return Color3.fromRGB(255, 170, 0) -- NPC
+    end
+    if ESP.TeamCheck and plr.TeamColor ~= LocalPlayer.TeamColor then
+        return Color3.fromRGB(255, 60, 60)
+    end
+    if ESP.TeamColor then
+        return plr.TeamColor.Color
+    end
+    return ESP.BoxColor
+end
+
+local function Register(plr)
+    if plr == LocalPlayer then return end
+    local ui = MakeUI()
+    SetupUI(ui)
+    ESP_UI[plr] = ui
+end
+
+local function Unregister(plr)
+    local ui = ESP_UI[plr]
     if ui then
         for _, d in pairs(ui) do
             pcall(d.Remove, d)
         end
-        ESP_UI[character] = nil
-    end
-end
-
-local function Register(character, name, isNPC)
-    if not ESP.State then return end
-    if not character or ESP_Data[character] then return end
-    local hum = character:FindFirstChildOfClass("Humanoid")
-    local root = character:FindFirstChild("HumanoidRootPart")
-        or character:FindFirstChild("Torso")
-        or character.PrimaryPart
-    if not hum or not root then return end
-    ESP_Data[character] = {
-        name = name,
-        hum = hum,
-        root = root,
-        isNPC = isNPC,
-    }
-    MakeUI(character)
-end
-
-local function Unregister(character, removeUI)
-    ESP_Data[character] = nil
-    if removeUI then RemoveUI(character) end
-end
-
-local function GetColor(character, isNPC)
-    if isNPC then
-        return Color3.fromRGB(255, 170, 0)
-    end
-    local plr = Players:GetPlayerFromCharacter(character)
-    if plr and ESP.TeamCheck and plr.TeamColor ~= LocalPlayer.TeamColor then
-        return Color3.fromRGB(255, 60, 60)
-    end
-    return Color3.fromRGB(60, 170, 255)
-end
-
-local function ConnectPlayer(plr)
-    if plr == LocalPlayer then return end
-    local added = plr.CharacterAdded:Connect(function(char)
-        Register(char, plr.Name, false)
-    end)
-    local removed = plr.CharacterRemoving:Connect(function(char)
-        Unregister(char, true)
-    end)
-    table.insert(ESP_Connections, added)
-    table.insert(ESP_Connections, removed)
-    if plr.Character then
-        Register(plr.Character, plr.Name, false)
+        ESP_UI[plr] = nil
     end
 end
 
@@ -114,94 +166,141 @@ local function Start()
     ESP.State = true
 
     for _, plr in ipairs(Players:GetPlayers()) do
-        ConnectPlayer(plr)
+        Register(plr)
     end
-    table.insert(ESP_Connections, Players.PlayerAdded:Connect(ConnectPlayer))
-    table.insert(ESP_Connections, Players.PlayerRemoving:Connect(function(plr)
-        if plr.Character then Unregister(plr.Character, true) end
-    end))
 
-    ESP_NPCScan = RunService.Heartbeat:Connect(function()
-        ESP_ScanTick = ESP_ScanTick + 1
-        if ESP_ScanTick % 120 ~= 0 then return end
-        local seen = {}
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if plr.Character then seen[plr.Character] = true end
-        end
-        for _, char in ipairs(workspace:GetDescendants()) do
-            if char:IsA("Model") and not seen[char] and char ~= LocalPlayer.Character then
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                if hum and hum.Health > 0 and hum.MaxHealth > 0 and not ESP_Data[char] then
-                    Register(char, char.Name, true)
-                end
-            end
-        end
-        for char in pairs(ESP_Data) do
-            if ESP_Data[char].isNPC and (not char.Parent or not char:IsDescendantOf(workspace)) then
-                Unregister(char, true)
-            end
-        end
-    end)
+    table.insert(ESP_Connections, Players.PlayerAdded:Connect(Register))
+    table.insert(ESP_Connections, Players.PlayerRemoving:Connect(Unregister))
 
     ESP_Render = RunService.RenderStepped:Connect(function()
-        local cam = workspace.CurrentCamera
-        if not cam then return end
-        local viewport = cam.ViewportSize
-        for character, data in pairs(ESP_Data) do
-            local ui = ESP_UI[character]
-            if not ui then
-                MakeUI(character)
-                ui = ESP_UI[character]
-            end
-            local root = data.root
-            local hum = data.hum
-            if not root or not hum or hum.Health <= 0 then
-                for _, d in pairs(ui) do d.Visible = false end
-                continue
-            end
-            local screenPos, onScreen = cam:WorldToViewportPoint(root.Position)
-            local dist = (root.Position - cam.CFrame.Position).Magnitude
-            if not onScreen or dist > ESP.MaxDistance then
+        camera = workspace.CurrentCamera
+        if not camera then return end
+        local viewport = camera.ViewportSize
+
+        for plr, ui in pairs(ESP_UI) do
+            local char = plr.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if not char or not hum or hum.Health <= 0 then
                 for _, d in pairs(ui) do d.Visible = false end
                 continue
             end
 
-            local color = GetColor(character, data.isNPC)
-            local h = math.clamp(1000 / dist * 80, 30, 320)
-            local w = h * 0.6
-            local topLeft = Vector2.new(screenPos.X - w / 2, screenPos.Y - h / 2)
+            local root = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
+            if not root then
+                for _, d in pairs(ui) do d.Visible = false end
+                continue
+            end
 
-            ui.box.Position = topLeft
-            ui.box.Size = Vector2.new(w, h)
-            ui.box.Color = color
-            ui.box.Visible = ESP.Boxes
+            local rootPos, rootOnScreen = camera:WorldToViewportPoint(root.Position)
+            local dist = (root.Position - camera.CFrame.Position).Magnitude
+            if not rootOnScreen or dist > ESP.MaxDistance then
+                for _, d in pairs(ui) do d.Visible = false end
+                continue
+            end
 
-            local maxhp = hum.MaxHealth
-            local hpRatio = maxhp > 0 and math.clamp(hum.Health / maxhp, 0, 1) or 0
-            ui.hpbg.Position = Vector2.new(topLeft.X, topLeft.Y - 6)
-            ui.hpbg.Size = Vector2.new(w, 4)
-            ui.hpbg.Color = Color3.fromRGB(30, 30, 30)
-            ui.hpbg.Visible = ESP.Health
-            ui.hp.Position = ui.hpbg.Position
-            ui.hp.Size = Vector2.new(w * hpRatio, 4)
-            ui.hp.Color = hpRatio > 0.5 and Color3.fromRGB(0, 240, 0)
-                or (hpRatio > 0.25 and Color3.fromRGB(255, 200, 0) or Color3.fromRGB(255, 40, 40))
-            ui.hp.Visible = ESP.Health
+            -- Get stable 2D bounding box
+            local bb = GetBoundingBox2D(char)
+            if not bb then
+                -- Fallback: use root position with distance-based size
+                local h = math.clamp(1000 / dist * 80, 30, 320)
+                local w = h * 0.6
+                bb = {
+                    X = rootPos.X - w / 2,
+                    Y = rootPos.Y - h / 2,
+                    Width = w,
+                    Height = h,
+                }
+            end
 
-            ui.name.Text = data.name
-            ui.name.Position = Vector2.new(screenPos.X, topLeft.Y - 20)
-            ui.name.Color = color
-            ui.name.Visible = ESP.Names
+            local color = GetColor(char)
+            local boxThick = ESP.BoxThickness
+            local tracerThick = ESP.TracerThickness
 
-            ui.dist.Text = math.floor(dist) .. "s"
-            ui.dist.Position = Vector2.new(screenPos.X, topLeft.Y + h + 4)
-            ui.dist.Color = Color3.fromRGB(255, 255, 255)
-            ui.dist.Visible = ESP.Distance
+            -- Box (with outline)
+            if ESP.Boxes then
+                ui.boxOutline.Position = Vector2.new(bb.X - 1, bb.Y - 1)
+                ui.boxOutline.Size = Vector2.new(bb.Width + 2, bb.Height + 2)
+                ui.boxOutline.Thickness = boxThick + 2
+                ui.boxOutline.Color = Color3.fromRGB(0, 0, 0)
+                ui.boxOutline.Visible = true
 
-            ui.tracer.From = Vector2.new(viewport.X / 2, viewport.Y)
-            ui.tracer.To = Vector2.new(screenPos.X, screenPos.Y - h / 2)
-            ui.tracer.Color = color
-            ui.tracer.Visible = ESP.Tracers
+                ui.box.Position = Vector2.new(bb.X, bb.Y)
+                ui.box.Size = Vector2.new(bb.Width, bb.Height)
+                ui.box.Thickness = boxThick
+                ui.box.Color = color
+                ui.box.Visible = true
+            else
+                ui.box.Visible = false
+                ui.boxOutline.Visible = false
+            end
+
+            -- Health bar
+            if ESP.Health then
+                local maxhp = hum.MaxHealth
+                local hpRatio = maxhp > 0 and math.clamp(hum.Health / maxhp, 0, 1) or 0
+                local barWidth = bb.Width
+                local barHeight = 4
+
+                ui.healthBg.Position = Vector2.new(bb.X, bb.Y - barHeight - 2)
+                ui.healthBg.Size = Vector2.new(barWidth, barHeight)
+                ui.healthBg.Visible = true
+
+                ui.healthBar.Position = Vector2.new(bb.X, bb.Y - barHeight - 2)
+                ui.healthBar.Size = Vector2.new(barWidth * hpRatio, barHeight)
+                ui.healthBar.Color = hpRatio > 0.5 and Color3.fromRGB(0, 240, 0)
+                    or (hpRatio > 0.25 and Color3.fromRGB(255, 200, 0) or Color3.fromRGB(255, 40, 40))
+                ui.healthBar.Visible = true
+            else
+                ui.healthBg.Visible = false
+                ui.healthBar.Visible = false
+            end
+
+            -- Name
+            if ESP.Names then
+                ui.name.Text = plr.Name
+                ui.name.Position = Vector2.new(rootPos.X, bb.Y - 18)
+                ui.name.Visible = true
+            else
+                ui.name.Visible = false
+            end
+
+            -- Distance
+            if ESP.Distance then
+                ui.dist.Text = math.floor(dist) .. "s"
+                ui.dist.Position = Vector2.new(rootPos.X, bb.Y + bb.Height + 4)
+                ui.dist.Visible = true
+            else
+                ui.dist.Visible = false
+            end
+
+            -- Tracer (with outline)
+            if ESP.Tracers then
+                local origin
+                if ESP.TracerFollowMouse then
+                    origin = Vector2.new(mouse.X, mouse.Y + 36)
+                elseif ESP.TracerOrigin == "Middle" then
+                    origin = viewport * 0.5
+                else -- Bottom
+                    origin = Vector2.new(viewport.X * 0.5, viewport.Y)
+                end
+
+                local target = Vector2.new(rootPos.X, bb.Y + bb.Height)
+
+                ui.tracerOutline.From = origin
+                ui.tracerOutline.To = target
+                ui.tracerOutline.Thickness = tracerThick + 2
+                ui.tracerOutline.Color = Color3.fromRGB(0, 0, 0)
+                ui.tracerOutline.Visible = true
+
+                ui.tracer.From = origin
+                ui.tracer.To = target
+                ui.tracer.Thickness = tracerThick
+                ui.tracer.Color = color
+                ui.tracer.Visible = true
+            else
+                ui.tracer.Visible = false
+                ui.tracerOutline.Visible = false
+            end
         end
     end)
 end
@@ -217,16 +316,11 @@ local function Stop()
         ESP_Render:Disconnect()
         ESP_Render = nil
     end
-    if ESP_NPCScan then
-        ESP_NPCScan:Disconnect()
-        ESP_NPCScan = nil
-    end
-    for char in pairs(ESP_Data) do
-        Unregister(char, true)
+    for plr in pairs(ESP_UI) do
+        Unregister(plr)
     end
 end
 
--- API 테이블 반환
 return {
     Start = Start,
     Stop = Stop,
