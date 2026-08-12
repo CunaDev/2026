@@ -1,0 +1,268 @@
+local SpeedBypass = {}
+
+-- ------------------------------------------------------------------
+-- 내부 상태
+-- ------------------------------------------------------------------
+local State = {
+	Enabled           = false,   -- 마스터 토글
+	CurrentSpeed      = 16,      -- 활성화 시 목표 WalkSpeed
+	Seat              = nil,     -- 투명 의자 인스턴스
+	SeatWeld          = nil,     -- 의자를 캐릭터 루트에 고정하는 용접
+	Character         = nil,     -- 현재(로컬) 캐릭터
+	Humanoid          = nil,     -- 현재 휴머노이드
+	ConnCharacterAdded = nil,    -- CharacterAdded 연결
+	ConnHeartbeat       = nil,    -- Heartbeat 연결
+}
+
+local SPEED_MIN   = 0
+local SPEED_MAX   = 100
+
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ------------------------------------------------------------------
+-- 안전 래퍼
+-- ------------------------------------------------------------------
+local function SafeCall(fn, ...)
+	local ok, result = pcall(fn, ...)
+	if not ok then
+		warn("[SpeedBypass] pcall 가드 발동:", result)
+		return nil
+	end
+	return result
+end
+
+local function Clamp(value, min, max)
+	return math.max(min, math.min(max, value))
+end
+
+-- ------------------------------------------------------------------
+-- 의자 생성
+-- ------------------------------------------------------------------
+local function CreateSeat(parent)
+	local seat = Instance.new("Seat")
+	seat.Name = "SpeedBypassSeat"
+	seat.Transparency = 1
+	seat.Size = Vector3.new(2, 0.2, 2)
+	seat.Anchored = false
+	seat.CanCollide = false
+	seat.CanTouch = false
+	seat.Parent = parent
+	return seat
+end
+
+local function WeldSeatToRoot(seat, root)
+	local weld = Instance.new("Weld")
+	weld.Name = "SpeedBypassWeld"
+	weld.Part0 = root
+	weld.Part1 = seat
+	weld.C0 = CFrame.new(0, -2, 1)   -- 캐릭터 아래/뒤쪽에 배치
+	weld.Parent = seat
+	return weld
+end
+
+local function RemoveSeat()
+	if State.Seat then
+		SafeCall(function()
+			State.Seat:Destroy()
+		end)
+	end
+	State.Seat = nil
+	State.SeatWeld = nil
+end
+
+-- ------------------------------------------------------------------
+-- 적용: 의자 + 용접 생성 후 플레이어 앉히기
+-- ------------------------------------------------------------------
+local function ApplySeat()
+	local char   = State.Character
+	local humanoid = State.Humanoid
+	if not char or not humanoid then
+		return
+	end
+
+	local root = SafeCall(function()
+		return char:FindFirstChild("HumanoidRootPart")
+	end)
+	if not root then
+		return
+	end
+
+	RemoveSeat()
+
+	local seat = SafeCall(function()
+		local s = CreateSeat(char)
+		local w = WeldSeatToRoot(s, root)
+		s.CFrame = root.CFrame * CFrame.new(0, -2, 1)
+		return s, w
+	end)
+	if not seat then
+		return
+	end
+
+	State.Seat = seat
+	State.SeatWeld = seat:FindFirstChild("SpeedBypassWeld")
+
+	SafeCall(function()
+		humanoid.Sit = true
+		task.wait(0.1)
+		humanoid.Sit = false
+	end)
+end
+
+-- ------------------------------------------------------------------
+-- Heartbeat 드라이버
+-- ------------------------------------------------------------------
+local function OnHeartbeat()
+	if not State.Enabled then
+		return
+	end
+
+	local char   = State.Character
+	local humanoid = State.Humanoid
+	if not char or not humanoid or not char.Parent then
+		return
+	end
+
+	-- 의자가 사라졌으면 재생성
+	if not State.Seat or not State.Seat.Parent then
+		SafeCall(ApplySeat)
+		return
+	end
+
+	-- 목표 속도 강제 적용
+	SafeCall(function()
+		humanoid.WalkSpeed = State.CurrentSpeed
+	end)
+end
+
+-- ------------------------------------------------------------------
+-- 리스폰 처리
+-- ------------------------------------------------------------------
+local function OnCharacterAdded(character)
+	State.Character = character
+	State.Humanoid = SafeCall(function()
+		return character:WaitForChild("Humanoid", 5)
+	end)
+
+	RemoveSeat()
+
+	if State.Enabled then
+		task.spawn(function()
+			task.wait(0.5)   -- 리그가 안정된 후 다시 앉히기
+			if State.Enabled then
+				SafeCall(ApplySeat)
+			end
+		end)
+	end
+end
+
+-- ------------------------------------------------------------------
+-- 공개 인터페이스
+-- ------------------------------------------------------------------
+function SpeedBypass.Toggle(desired)
+	if desired == nil then
+		desired = not State.Enabled
+	end
+
+	local ok = SafeCall(function()
+		if desired then
+			State.Enabled = true
+			ApplySeat()
+		else
+			State.Enabled = false
+			RemoveSeat()
+			if State.Humanoid then
+				State.Humanoid.WalkSpeed = 16
+			end
+		end
+	end)
+
+	if ok == nil then
+		State.Enabled = false
+	end
+
+	return State.Enabled
+end
+
+function SpeedBypass.SetSpeed(value)
+	local clamped = Clamp(value, SPEED_MIN, SPEED_MAX)
+	State.CurrentSpeed = clamped
+	return clamped
+end
+
+function SpeedBypass.GetStatus()
+	return {
+		Enabled        = State.Enabled,
+		CurrentSpeed   = State.CurrentSpeed,
+		SeatActive     = State.Seat ~= nil and State.Seat.Parent ~= nil,
+		CharacterAlive = State.Character ~= nil and State.Character.Parent ~= nil,
+	}
+end
+
+-- 선택적 ui-lib 연동. .update/.onChanged 또는 단순 게터를 갖는 요소를
+-- 기대하며, 형태가 다르면 조용히 무시한다.
+function SpeedBypass.Bind(hub)
+	if not hub then
+		return
+	end
+	SafeCall(function()
+		-- 허브를 순회하며 "Speed" 토글 + "Speed value" 슬라이더를 찾는다
+		for _, tab in pairs(hub) do
+			for _, column in pairs(tab) do
+				for _, section in pairs(column) do
+					for _, element in pairs(section) do
+						local label = element.Name or element.Text or ""
+						if type(element) == "table" then
+							if label:match("^Speed") then
+								element:onChanged(function(value)
+									SpeedBypass.Toggle(value)
+								end)
+							elseif label:match("Speed value") then
+								element:onChanged(function(value)
+									SpeedBypass.SetSpeed(value)
+								end)
+							end
+						end
+					end
+				end
+			end
+		end
+	end)
+end
+
+function SpeedBypass.Destroy()
+	State.Enabled = false
+	RemoveSeat()
+
+	if State.ConnCharacterAdded then
+		State.ConnCharacterAdded:Disconnect()
+	end
+	if State.ConnHeartbeat then
+		State.ConnHeartbeat:Disconnect()
+	end
+	State.ConnCharacterAdded = nil
+	State.ConnHeartbeat = nil
+
+	if State.Humanoid then
+		SafeCall(function()
+			State.Humanoid.WalkSpeed = 16
+		end)
+	end
+end
+
+-- ------------------------------------------------------------------
+-- 부팅
+-- ------------------------------------------------------------------
+task.spawn(function()
+	State.ConnCharacterAdded = LocalPlayer.CharacterAdded:Connect(OnCharacterAdded)
+	if LocalPlayer.Character then
+		OnCharacterAdded(LocalPlayer.Character)
+	end
+	State.ConnHeartbeat = RunService.Heartbeat:Connect(OnHeartbeat)
+end)
+
+getgenv().SpeedBypass = SpeedBypass
+return SpeedBypass
