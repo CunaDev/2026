@@ -1,322 +1,199 @@
--- ESP Module - Blissful Design (fix: sizing, drift, team check, health pos)
--- Quad box, vertical health bar, modular API
--- API: { Start(), Stop(), ESP = { ... } }
+-- Made by Blissful#4992
+local Players = game:service("Players")
+local Player = Players.LocalPlayer
+local Mouse = Player:GetMouse()
+local Camera = game:service("Workspace").CurrentCamera
+local RS = game:service("RunService")
+local UIS = game:service("UserInputService")
 
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local GuiService = game:GetService("GuiService")
-local LocalPlayer = Players.LocalPlayer
-local mouse = LocalPlayer:GetMouse()
+repeat wait() until Player.Character ~= nil and Player.Character.PrimaryPart ~= nil
 
-local ESP = {
-    State = false,
-    Boxes = true,
-    Tracers = true,
-    Names = true,
-    Distance = false,
-    Health = true,
-    TeamCheck = false,  -- true = hide same-team players
-    TeamColor = true,    -- color by team
-    MaxDistance = 500,
-    BoxColor = Color3.fromRGB(255, 0, 0),
-    TracerColor = Color3.fromRGB(255, 0, 0),
-    BoxThickness = 1,
-    TracerThickness = 1,
-    TracerOrigin = "Bottom",
-    TracerFollowMouse = false,
-    HealthBarPosition = "Left", -- "Left", "Right", "Top", "Bottom"
+local LerpColorModule = loadstring(game:HttpGet("https://pastebin.com/raw/wRnsJeid"))()
+local HealthBarLerp = LerpColorModule:Lerp(Color3.fromRGB(255, 0, 0), Color3.fromRGB(0, 255, 0))
+
+local function NewCircle(Transparency, Color, Radius, Filled, Thickness)
+    local c = Drawing.new("Circle")
+    c.Transparency = Transparency
+    c.Color = Color
+    c.Visible = false
+    c.Thickness = Thickness
+    c.Position = Vector2.new(0, 0)
+    c.Radius = Radius
+    c.NumSides = math.clamp(Radius*55/100, 10, 75)
+    c.Filled = Filled
+    return c
+end
+
+local RadarInfo = {
+    Position = Vector2.new(200, 200),
+    Radius = 100,
+    Scale = 1, -- Determinant factor on the effect of the relative position for the 2D integration
+    RadarBack = Color3.fromRGB(10, 10, 10),
+    RadarBorder = Color3.fromRGB(75, 75, 75),
+    LocalPlayerDot = Color3.fromRGB(255, 255, 255),
+    PlayerDot = Color3.fromRGB(60, 170, 255),
+    Team = Color3.fromRGB(0, 255, 0),
+    Enemy = Color3.fromRGB(255, 0, 0),
+    Health_Color = true,
+    Team_Check = true
 }
 
-local ESP_UI = {}
-local ESP_Connections = {}
-local ESP_Render
+local RadarBackground = NewCircle(0.9, RadarInfo.RadarBack, RadarInfo.Radius, true, 1)
+RadarBackground.Visible = true
+RadarBackground.Position = RadarInfo.Position
 
-local function NewQuad(thickness, color)
-    local q = Drawing.new("Quad")
-    q.Visible = false
-    q.PointA = Vector2.new(0, 0)
-    q.PointB = Vector2.new(0, 0)
-    q.PointC = Vector2.new(0, 0)
-    q.PointD = Vector2.new(0, 0)
-    q.Color = color
-    q.Filled = false
-    q.Thickness = thickness
-    q.Transparency = 1
-    return q
-end
+local RadarBorder = NewCircle(0.75, RadarInfo.RadarBorder, RadarInfo.Radius, false, 3)
+RadarBorder.Visible = true
+RadarBorder.Position = RadarInfo.Position
 
-local function NewLine(thickness, color)
-    local l = Drawing.new("Line")
-    l.Visible = false
-    l.From = Vector2.new(0, 0)
-    l.To = Vector2.new(0, 0)
-    l.Color = color
-    l.Thickness = thickness
-    l.Transparency = 1
-    return l
-end
-
-local function MakeUI()
-    return {
-        blacktracer = NewLine(2, Color3.fromRGB(0, 0, 0)),
-        tracer = NewLine(1, ESP.TracerColor),
-        black = NewQuad(2, Color3.fromRGB(0, 0, 0)),
-        box = NewQuad(1, ESP.BoxColor),
-        healthbar = NewLine(3, Color3.fromRGB(0, 0, 0)),
-        greenhealth = NewLine(1.5, Color3.fromRGB(0, 0, 0)),
-        name = Drawing.new("Text"),
-        dist = Drawing.new("Text"),
-    }
-end
-
-local function SetupUI(ui)
-    ui.name.Center = true
-    ui.name.Outline = true
-    ui.name.Size = 13
-    ui.name.Visible = false
-    ui.dist.Center = true
-    ui.dist.Outline = true
-    ui.dist.Size = 12
-    ui.dist.Visible = false
-end
-
-local function Colorize(lib, color)
-    for _, x in pairs(lib) do
-        if x ~= lib.healthbar and x ~= lib.greenhealth and x ~= lib.blacktracer and x ~= lib.black then
-            x.Color = color
-        end
+local function GetRelative(pos)
+    local char = Player.Character
+    if char ~= nil and char.PrimaryPart ~= nil then
+        local pmpart = char.PrimaryPart
+        local camerapos = Vector3.new(Camera.CFrame.Position.X, pmpart.Position.Y, Camera.CFrame.Position.Z)
+        local newcf = CFrame.new(pmpart.Position, camerapos)
+        local r = newcf:PointToObjectSpace(pos)
+        return r.X, r.Z
+    else
+        return 0, 0
     end
 end
 
-local function BoxSizeImpl(ui, cx, cy, hw, hh)
-    ui.black.PointA = Vector2.new(cx + hw + 1, cy - hh - 1)
-    ui.black.PointB = Vector2.new(cx - hw - 1, cy - hh - 1)
-    ui.black.PointC = Vector2.new(cx - hw - 1, cy + hh + 1)
-    ui.black.PointD = Vector2.new(cx + hw + 1, cy + hh + 1)
+local function PlaceDot(plr)
+    local PlayerDot = NewCircle(1, RadarInfo.PlayerDot, 3, true, 1)
 
-    ui.box.PointA = Vector2.new(cx + hw, cy - hh)
-    ui.box.PointB = Vector2.new(cx - hw, cy - hh)
-    ui.box.PointC = Vector2.new(cx - hw, cy + hh)
-    ui.box.PointD = Vector2.new(cx + hw, cy + hh)
-end
-
-local function GetColor(plr)
-    if ESP.TeamColor then
-        return plr.TeamColor.Color
-    end
-    return ESP.BoxColor
-end
-
-local function Register(plr)
-    if plr == LocalPlayer then return end
-    local ui = MakeUI()
-    SetupUI(ui)
-    ESP_UI[plr] = ui
-end
-
-local function Unregister(plr)
-    local ui = ESP_UI[plr]
-    if ui then
-        for _, d in pairs(ui) do
-            pcall(d.Remove, d)
-        end
-        ESP_UI[plr] = nil
-    end
-end
-
-local function Start()
-    if ESP.State then return end
-    ESP.State = true
-
-    for _, plr in ipairs(Players:GetPlayers()) do
-        Register(plr)
-    end
-
-    table.insert(ESP_Connections, Players.PlayerAdded:Connect(Register))
-    table.insert(ESP_Connections, Players.PlayerRemoving:Connect(Unregister))
-
-    ESP_Render = RunService.RenderStepped:Connect(function()
-        local camera = workspace.CurrentCamera
-        if not camera then return end
-        local viewport = camera.ViewportSize
-        local inset = GuiService:GetGuiInset()
-
-        for plr, ui in pairs(ESP_UI) do
-            -- Team Check: hide ESP for same team
-            if ESP.TeamCheck and plr.TeamColor == LocalPlayer.TeamColor then
-                for _, d in pairs(ui) do d.Visible = false end
-                continue
-            end
-
+    local function Update()
+        local c 
+        c = game:service("RunService").RenderStepped:Connect(function()
             local char = plr.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if not char or not hum or hum.Health <= 0 then
-                for _, d in pairs(ui) do d.Visible = false end
-                continue
-            end
-
-            local head = char:FindFirstChild("Head")
-            local root = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
-            if not head or not root then
-                for _, d in pairs(ui) do d.Visible = false end
-                continue
-            end
-
-            local dist = (root.Position - camera.CFrame.Position).Magnitude
-            if dist > ESP.MaxDistance then
-                for _, d in pairs(ui) do d.Visible = false end
-                continue
-            end
-
-            -- Screen-space approach: measure head-to-root on screen
-            local headScreen = camera:WorldToViewportPoint(head.Position)
-            local rootScreen = camera:WorldToViewportPoint(root.Position)
-            local distY = math.clamp(math.abs(headScreen.Y - rootScreen.Y), 2, math.huge)
-
-            -- Box center between head and root
-            local boxCX = rootScreen.X
-            local boxCY = (headScreen.Y + rootScreen.Y) / 2
-            local boxHalfH = distY * 1.35
-            local boxHalfW = boxHalfH * 0.5
-
-            -- At distance, minimum visible box (centered on head/root midpoint)
-            local minH = 25
-            if boxHalfH < minH then
-                boxHalfH = minH
-                boxHalfW = minH * 0.5
-            end
-
-            local color = GetColor(plr)
-            local boxThick = ESP.BoxThickness
-            local tracerThick = ESP.TracerThickness
-
-            ui.black.Thickness = boxThick + 2
-            ui.box.Thickness = boxThick
-            ui.blacktracer.Thickness = tracerThick + 2
-            ui.tracer.Thickness = tracerThick
-
-            -- Box
-            if ESP.Boxes then
-                BoxSizeImpl(ui, boxCX, boxCY, boxHalfW, boxHalfH)
-                ui.box.Color = color
-                ui.black.Visible = true
-                ui.box.Visible = true
-            else
-                ui.black.Visible = false
-                ui.box.Visible = false
-            end
-
-            -- Health bar
-            if ESP.Health then
-                local hpRatio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-                local hpColor = Color3.fromRGB(0, 255, 0):Lerp(
-                    Color3.fromRGB(255, 0, 0), 1 - hpRatio)
-                local gap = 4
-                local hpLen = boxHalfH * 2
-
-                if ESP.HealthBarPosition == "Left" then
-                    local bx = boxCX - boxHalfW - gap
-                    ui.healthbar.From = Vector2.new(bx, boxCY + boxHalfH)
-                    ui.healthbar.To = Vector2.new(bx, boxCY - boxHalfH)
-                    ui.greenhealth.From = Vector2.new(bx, boxCY + boxHalfH)
-                    ui.greenhealth.To = Vector2.new(bx, boxCY + boxHalfH - hpLen * hpRatio)
-                elseif ESP.HealthBarPosition == "Right" then
-                    local bx = boxCX + boxHalfW + gap
-                    ui.healthbar.From = Vector2.new(bx, boxCY + boxHalfH)
-                    ui.healthbar.To = Vector2.new(bx, boxCY - boxHalfH)
-                    ui.greenhealth.From = Vector2.new(bx, boxCY + boxHalfH)
-                    ui.greenhealth.To = Vector2.new(bx, boxCY + boxHalfH - hpLen * hpRatio)
-                elseif ESP.HealthBarPosition == "Top" then
-                    local by = boxCY - boxHalfH - gap
-                    local hpW = boxHalfW * 2
-                    ui.healthbar.From = Vector2.new(boxCX - boxHalfW, by)
-                    ui.healthbar.To = Vector2.new(boxCX + boxHalfW, by)
-                    ui.greenhealth.From = Vector2.new(boxCX - boxHalfW, by)
-                    ui.greenhealth.To = Vector2.new(boxCX - boxHalfW + hpW * hpRatio, by)
-                else -- Bottom
-                    local by = boxCY + boxHalfH + gap
-                    local hpW = boxHalfW * 2
-                    ui.healthbar.From = Vector2.new(boxCX - boxHalfW, by)
-                    ui.healthbar.To = Vector2.new(boxCX + boxHalfW, by)
-                    ui.greenhealth.From = Vector2.new(boxCX - boxHalfW, by)
-                    ui.greenhealth.To = Vector2.new(boxCX - boxHalfW + hpW * hpRatio, by)
+            if char and char:FindFirstChildOfClass("Humanoid") and char.PrimaryPart ~= nil and char:FindFirstChildOfClass("Humanoid").Health > 0 then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                local scale = RadarInfo.Scale
+                local relx, rely = GetRelative(char.PrimaryPart.Position)
+                local newpos = RadarInfo.Position - Vector2.new(relx * scale, rely * scale) 
+                
+                if (newpos - RadarInfo.Position).magnitude < RadarInfo.Radius-2 then 
+                    PlayerDot.Radius = 3   
+                    PlayerDot.Position = newpos
+                    PlayerDot.Visible = true
+                else 
+                    local dist = (RadarInfo.Position - newpos).magnitude
+                    local calc = (RadarInfo.Position - newpos).unit * (dist - RadarInfo.Radius)
+                    local inside = Vector2.new(newpos.X + calc.X, newpos.Y + calc.Y)
+                    PlayerDot.Radius = 2
+                    PlayerDot.Position = inside
+                    PlayerDot.Visible = true
                 end
 
-                ui.greenhealth.Color = hpColor
-                ui.healthbar.Color = Color3.fromRGB(0, 0, 0)
-                ui.healthbar.Visible = true
-                ui.greenhealth.Visible = true
-            else
-                ui.healthbar.Visible = false
-                ui.greenhealth.Visible = false
-            end
-
-            -- Name
-            if ESP.Names then
-                ui.name.Text = plr.Name
-                ui.name.Color = color
-                ui.name.Position = Vector2.new(boxCX, boxCY - boxHalfH - 16)
-                ui.name.Visible = true
-            else
-                ui.name.Visible = false
-            end
-
-            -- Distance
-            if ESP.Distance then
-                ui.dist.Text = math.floor(dist) .. "s"
-                ui.dist.Position = Vector2.new(boxCX, boxCY + boxHalfH + 4)
-                ui.dist.Visible = true
-            else
-                ui.dist.Visible = false
-            end
-
-            -- Tracer
-            if ESP.Tracers then
-                local origin
-                if ESP.TracerFollowMouse then
-                    origin = Vector2.new(mouse.X, mouse.Y - inset.Y)
-                elseif ESP.TracerOrigin == "Middle" then
-                    origin = Vector2.new(viewport.X / 2, viewport.Y / 2)
-                else
-                    origin = Vector2.new(viewport.X / 2, viewport.Y)
+                PlayerDot.Color = RadarInfo.PlayerDot
+                if RadarInfo.Team_Check then
+                    if plr.TeamColor == Player.TeamColor then
+                        PlayerDot.Color = RadarInfo.Team
+                    else
+                        PlayerDot.Color = RadarInfo.Enemy
+                    end
                 end
 
-                local target = Vector2.new(boxCX, boxCY + boxHalfH)
-
-                ui.blacktracer.From = origin
-                ui.blacktracer.To = target
-                ui.blacktracer.Visible = true
-
-                ui.tracer.From = origin
-                ui.tracer.To = target
-                ui.tracer.Color = color
-                ui.tracer.Visible = true
-            else
-                ui.tracer.Visible = false
-                ui.blacktracer.Visible = false
+                if RadarInfo.Health_Color then
+                    PlayerDot.Color = HealthBarLerp(hum.Health / hum.MaxHealth)
+                end
+            else 
+                PlayerDot.Visible = false
+                if Players:FindFirstChild(plr.Name) == nil then
+                    PlayerDot:Remove()
+                    c:Disconnect()
+                end
             end
+        end)
+    end
+    coroutine.wrap(Update)()
+end
+
+for _,v in pairs(Players:GetChildren()) do
+    if v.Name ~= Player.Name then
+        PlaceDot(v)
+    end
+end
+
+local function NewLocalDot()
+    local d = Drawing.new("Triangle")
+    d.Visible = true
+    d.Thickness = 1
+    d.Filled = true
+    d.Color = RadarInfo.LocalPlayerDot
+    d.PointA = RadarInfo.Position + Vector2.new(0, -6)
+    d.PointB = RadarInfo.Position + Vector2.new(-3, 6)
+    d.PointC = RadarInfo.Position + Vector2.new(3, 6)
+    return d
+end
+
+local LocalPlayerDot = NewLocalDot()
+
+Players.PlayerAdded:Connect(function(v)
+    if v.Name ~= Player.Name then
+        PlaceDot(v)
+    end
+    LocalPlayerDot:Remove()
+    LocalPlayerDot = NewLocalDot()
+end)
+
+-- Loop
+coroutine.wrap(function()
+    local c 
+    c = game:service("RunService").RenderStepped:Connect(function()
+        if LocalPlayerDot ~= nil then
+            LocalPlayerDot.Color = RadarInfo.LocalPlayerDot
+            LocalPlayerDot.PointA = RadarInfo.Position + Vector2.new(0, -6)
+            LocalPlayerDot.PointB = RadarInfo.Position + Vector2.new(-3, 6)
+            LocalPlayerDot.PointC = RadarInfo.Position + Vector2.new(3, 6)
+        end
+        RadarBackground.Position = RadarInfo.Position
+        RadarBackground.Radius = RadarInfo.Radius
+        RadarBackground.Color = RadarInfo.RadarBack
+
+        RadarBorder.Position = RadarInfo.Position
+        RadarBorder.Radius = RadarInfo.Radius
+        RadarBorder.Color = RadarInfo.RadarBorder
+    end)
+end)()
+
+-- Draggable
+local inset = game:service("GuiService"):GetGuiInset()
+
+local dragging = false
+local offset = Vector2.new(0, 0)
+UIS.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 and (Vector2.new(Mouse.X, Mouse.Y + inset.Y) - RadarInfo.Position).magnitude < RadarInfo.Radius then
+        offset = RadarInfo.Position - Vector2.new(Mouse.X, Mouse.Y)
+        dragging = true
+    end
+end)
+
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = false
+    end
+end)
+
+coroutine.wrap(function()
+    local dot = NewCircle(1, Color3.fromRGB(255, 255, 255), 3, true, 1)
+    local c 
+    c = game:service("RunService").RenderStepped:Connect(function()
+        if (Vector2.new(Mouse.X, Mouse.Y + inset.Y) - RadarInfo.Position).magnitude < RadarInfo.Radius then
+            dot.Position = Vector2.new(Mouse.X, Mouse.Y + inset.Y)
+            dot.Visible = true
+        else 
+            dot.Visible = false
+        end
+        if dragging then
+            RadarInfo.Position = Vector2.new(Mouse.X, Mouse.Y) + offset
         end
     end)
-end
+end)()
 
-local function Stop()
-    if not ESP.State then return end
-    ESP.State = false
-    for _, conn in ipairs(ESP_Connections) do
-        pcall(conn.Disconnect, conn)
-    end
-    ESP_Connections = {}
-    if ESP_Render then
-        ESP_Render:Disconnect()
-        ESP_Render = nil
-    end
-    for plr in pairs(ESP_UI) do
-        Unregister(plr)
-    end
-end
-
-return {
-    Start = Start,
-    Stop = Stop,
-    ESP = ESP,
-}
+--[[ Example:
+wait(3)
+RadarInfo.Position = Vector2.new(300, 300)
+RadarInfo.Radius = 150
+RadarInfo.RadarBack = Color3.fromRGB(50, 0, 0)
+]]
