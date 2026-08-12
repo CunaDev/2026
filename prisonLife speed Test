@@ -1,9 +1,23 @@
+--[[
+	원리
+		HumanoidRootPart 에 BodyVelocity 부착, 매 프레임 WASD 입력
+		방향 + 목표 속도로 Velocity 설정. WalkSpeed 는 절대 건드리지
+		않아 값 기반 서버 감지를 우회(솔직히 큰 의미는 없긴 함) BodyVelocity 는 클라이언트
+		측 인스턴스라 서버가 직접 관찰 불가. R6/R15 공용. (애니메이션 코드는 수정 해야함. <- R15)
+
+	인터페이스 (전역 `SpeedBypass`)
+		Toggle(boolean?) -> boolean
+		SetSpeed(number) -> number
+		GetStatus()      -> table
+		Destroy()        -> nil
+--]]
+
 local SpeedBypass = {}
 
 local State = {
 	Enabled           = false,
 	CurrentSpeed      = 16,
-	BodyVelocity      = nil,     -- HumanoidRootPart 에 부착
+	BodyVelocity      = nil,
 	Character         = nil,
 	Humanoid          = nil,
 	Root              = nil,
@@ -14,7 +28,7 @@ local State = {
 
 local SPEED_MIN   = 0
 local SPEED_MAX   = 500
-local RUN_ANIM_ID = "rbxassetid://180435571" -- R6/R15 공용
+local RUN_ANIM_ID = "rbxassetid://180435571"
 
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
@@ -52,14 +66,10 @@ local function PlayRunAnimation()
 	SafeCall(function()
 		local humanoid = State.Humanoid
 		if not humanoid then return end
-
-		-- Humanoid 상태를 Running 으로 강제 전환
-		-- (R6 는 Animator 가 없을 수 있음)
 		if humanoid:GetState() ~= Enum.HumanoidStateType.Running then
 			humanoid:ChangeState(Enum.HumanoidStateType.Running)
 		end
 
-		-- Animator 가 있으면 달리기 애니메이션 재생
 		local animator = humanoid:FindFirstChildOfClass("Animator")
 		if not animator then return end
 		if State.RunAnim and State.RunAnim.IsPlaying then return end
@@ -72,7 +82,6 @@ local function PlayRunAnimation()
 		track:Play()
 		track:AdjustSpeed(1)
 		State.RunAnim = track
-		Log("달리기 애니메이션 재생 시작")
 	end)
 end
 
@@ -88,7 +97,6 @@ end
 -- BodyVelocity 생성/제거
 -- ------------------------------------------------------------------
 local function CreateBodyVelocity(root)
-	-- 기존 인스턴스 제거
 	local existing = root:FindFirstChild("SpeedBypassVelocity")
 	if existing then
 		existing:Destroy()
@@ -96,11 +104,10 @@ local function CreateBodyVelocity(root)
 
 	local bv = Instance.new("BodyVelocity")
 	bv.Name = "SpeedBypassVelocity"
-	bv.MaxForce = Vector3.new(100000, 0, 100000)  -- Y 축은 중력
+	bv.MaxForce = Vector3.new(100000, 0, 100000)  -- Y 축은 중력에 위임
 	bv.Velocity = Vector3.zero
 	bv.P = 10000
 	bv.Parent = root
-	Log("BodyVelocity 생성됨, Parent=" .. root.Name)
 	return bv
 end
 
@@ -109,7 +116,6 @@ local function RemoveBodyVelocity()
 		SafeCall(function() State.BodyVelocity:Destroy() end)
 	end
 	State.BodyVelocity = nil
-	Log("BodyVelocity 제거됨")
 end
 
 -- ------------------------------------------------------------------
@@ -118,20 +124,13 @@ end
 local function ApplySpeed()
 	local root = State.Root
 	local humanoid = State.Humanoid
-	if not root or not humanoid then
-		Log("ApplySpeed 중단: root/humanoid 없음")
-		return
-	end
+	if not root or not humanoid then return end
 
 	RemoveBodyVelocity()
-
 	local bv = SafeCall(function()
 		return CreateBodyVelocity(root)
 	end)
-	if not bv then
-		Log("ApplySpeed 중단: BodyVelocity 생성 실패")
-		return
-	end
+	if not bv then return end
 
 	State.BodyVelocity = bv
 	Log("ApplySpeed 완료")
@@ -168,13 +167,10 @@ local function OnHeartbeat()
 	local humanoid = State.Humanoid
 	local bv = State.BodyVelocity
 	if not root or not humanoid or not bv or not bv.Parent then
-		-- BodyVelocity 소실 → 재생성
-		Log("Heartbeat: BodyVelocity 유실, 재생성")
 		ApplySpeed()
 		return
 	end
 
-	-- 입력 방향으로 속도 설정
 	SafeCall(function()
 		local dir = GetInputDirection()
 		if dir.Magnitude > 0.01 then
@@ -184,7 +180,6 @@ local function OnHeartbeat()
 		end
 	end)
 
-	-- 달리기 애니메이션 (R6 호환)
 	PlayRunAnimation()
 end
 
@@ -195,7 +190,6 @@ local function OnCharacterAdded(character)
 	State.Character = character
 	State.Humanoid = SafeCall(function() return character:WaitForChild("Humanoid", 5) end)
 	State.Root = SafeCall(function() return character:WaitForChild("HumanoidRootPart", 5) end)
-	Log("CharacterAdded: " .. tostring(character.Name))
 
 	RemoveBodyVelocity()
 	StopRunAnimation()
@@ -222,12 +216,10 @@ function SpeedBypass.Toggle(desired)
 			State.Enabled = true
 			ApplySpeed()
 			PlayRunAnimation()
-			Log("활성화 완료 — 속도=" .. State.CurrentSpeed)
 		else
 			State.Enabled = false
 			RemoveBodyVelocity()
 			StopRunAnimation()
-			Log("비활성화 완료")
 		end
 	end)
 
@@ -258,7 +250,6 @@ function SpeedBypass.Destroy()
 	if State.ConnHeartbeat then State.ConnHeartbeat:Disconnect() end
 	State.ConnCharacterAdded = nil
 	State.ConnHeartbeat = nil
-	Log("Destroy 완료")
 end
 
 -- ------------------------------------------------------------------
