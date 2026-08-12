@@ -1,1 +1,234 @@
 
+-- ESP Module - All in One
+-- 올인원 ESP 모듈. loadstring으로 불러와서 사용.
+-- 제작: V.I.I.B.E
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+
+local ESP = {
+    State = false,
+    Boxes = true,
+    Health = true,
+    Names = true,
+    Distance = false,
+    Tracers = false,
+    TeamCheck = true,
+    MaxDistance = 500,
+    IncludeNPCs = false,
+}
+
+local ESP_Data = {}
+local ESP_UI = {}
+local ESP_Connections = {}
+local ESP_Render
+local ESP_NPCScan
+local ESP_ScanTick = 0
+
+local function MakeUI(character)
+    local ui = {
+        box = Drawing.new("Square"),
+        hpbg = Drawing.new("Square"),
+        hp = Drawing.new("Square"),
+        name = Drawing.new("Text"),
+        dist = Drawing.new("Text"),
+        tracer = Drawing.new("Line"),
+    }
+    for _, d in pairs(ui) do
+        d.Visible = false
+        d.Thickness = 1
+    end
+    ui.box.Filled = false
+    ui.hpbg.Filled = true
+    ui.hp.Filled = true
+    ui.name.Center = true
+    ui.name.Outline = true
+    ui.name.Size = 13
+    ui.dist.Center = true
+    ui.dist.Outline = true
+    ui.dist.Size = 12
+    ESP_UI[character] = ui
+end
+
+local function RemoveUI(character)
+    local ui = ESP_UI[character]
+    if ui then
+        for _, d in pairs(ui) do
+            pcall(d.Remove, d)
+        end
+        ESP_UI[character] = nil
+    end
+end
+
+local function Register(character, name, isNPC)
+    if not ESP.State then return end
+    if not character or ESP_Data[character] then return end
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+        or character:FindFirstChild("Torso")
+        or character.PrimaryPart
+    if not hum or not root then return end
+    ESP_Data[character] = {
+        name = name,
+        hum = hum,
+        root = root,
+        isNPC = isNPC,
+    }
+    MakeUI(character)
+end
+
+local function Unregister(character, removeUI)
+    ESP_Data[character] = nil
+    if removeUI then RemoveUI(character) end
+end
+
+local function GetColor(character, isNPC)
+    if isNPC then
+        return Color3.fromRGB(255, 170, 0)
+    end
+    local plr = Players:GetPlayerFromCharacter(character)
+    if plr and ESP.TeamCheck and plr.TeamColor ~= LocalPlayer.TeamColor then
+        return Color3.fromRGB(255, 60, 60)
+    end
+    return Color3.fromRGB(60, 170, 255)
+end
+
+local function ConnectPlayer(plr)
+    if plr == LocalPlayer then return end
+    local added = plr.CharacterAdded:Connect(function(char)
+        Register(char, plr.Name, false)
+    end)
+    local removed = plr.CharacterRemoving:Connect(function(char)
+        Unregister(char, true)
+    end)
+    table.insert(ESP_Connections, added)
+    table.insert(ESP_Connections, removed)
+    if plr.Character then
+        Register(plr.Character, plr.Name, false)
+    end
+end
+
+local function Start()
+    if ESP.State then return end
+    ESP.State = true
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        ConnectPlayer(plr)
+    end
+    table.insert(ESP_Connections, Players.PlayerAdded:Connect(ConnectPlayer))
+    table.insert(ESP_Connections, Players.PlayerRemoving:Connect(function(plr)
+        if plr.Character then Unregister(plr.Character, true) end
+    end))
+
+    ESP_NPCScan = RunService.Heartbeat:Connect(function()
+        ESP_ScanTick = ESP_ScanTick + 1
+        if ESP_ScanTick % 120 ~= 0 then return end
+        local seen = {}
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr.Character then seen[plr.Character] = true end
+        end
+        for _, char in ipairs(workspace:GetDescendants()) do
+            if char:IsA("Model") and not seen[char] and char ~= LocalPlayer.Character then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 and hum.MaxHealth > 0 and not ESP_Data[char] then
+                    Register(char, char.Name, true)
+                end
+            end
+        end
+        for char in pairs(ESP_Data) do
+            if ESP_Data[char].isNPC and (not char.Parent or not char:IsDescendantOf(workspace)) then
+                Unregister(char, true)
+            end
+        end
+    end)
+
+    ESP_Render = RunService.RenderStepped:Connect(function()
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        local viewport = cam.ViewportSize
+        for character, data in pairs(ESP_Data) do
+            local ui = ESP_UI[character]
+            if not ui then
+                MakeUI(character)
+                ui = ESP_UI[character]
+            end
+            local root = data.root
+            local hum = data.hum
+            if not root or not hum or hum.Health <= 0 then
+                for _, d in pairs(ui) do d.Visible = false end
+                continue
+            end
+            local screenPos, onScreen = cam:WorldToViewportPoint(root.Position)
+            local dist = (root.Position - cam.CFrame.Position).Magnitude
+            if not onScreen or dist > ESP.MaxDistance then
+                for _, d in pairs(ui) do d.Visible = false end
+                continue
+            end
+
+            local color = GetColor(character, data.isNPC)
+            local h = math.clamp(1000 / dist * 80, 30, 320)
+            local w = h * 0.6
+            local topLeft = Vector2.new(screenPos.X - w / 2, screenPos.Y - h / 2)
+
+            ui.box.Position = topLeft
+            ui.box.Size = Vector2.new(w, h)
+            ui.box.Color = color
+            ui.box.Visible = ESP.Boxes
+
+            local maxhp = hum.MaxHealth
+            local hpRatio = maxhp > 0 and math.clamp(hum.Health / maxhp, 0, 1) or 0
+            ui.hpbg.Position = Vector2.new(topLeft.X, topLeft.Y - 6)
+            ui.hpbg.Size = Vector2.new(w, 4)
+            ui.hpbg.Color = Color3.fromRGB(30, 30, 30)
+            ui.hpbg.Visible = ESP.Health
+            ui.hp.Position = ui.hpbg.Position
+            ui.hp.Size = Vector2.new(w * hpRatio, 4)
+            ui.hp.Color = hpRatio > 0.5 and Color3.fromRGB(0, 240, 0)
+                or (hpRatio > 0.25 and Color3.fromRGB(255, 200, 0) or Color3.fromRGB(255, 40, 40))
+            ui.hp.Visible = ESP.Health
+
+            ui.name.Text = data.name
+            ui.name.Position = Vector2.new(screenPos.X, topLeft.Y - 20)
+            ui.name.Color = color
+            ui.name.Visible = ESP.Names
+
+            ui.dist.Text = math.floor(dist) .. "s"
+            ui.dist.Position = Vector2.new(screenPos.X, topLeft.Y + h + 4)
+            ui.dist.Color = Color3.fromRGB(255, 255, 255)
+            ui.dist.Visible = ESP.Distance
+
+            ui.tracer.From = Vector2.new(viewport.X / 2, viewport.Y)
+            ui.tracer.To = Vector2.new(screenPos.X, screenPos.Y - h / 2)
+            ui.tracer.Color = color
+            ui.tracer.Visible = ESP.Tracers
+        end
+    end)
+end
+
+local function Stop()
+    if not ESP.State then return end
+    ESP.State = false
+    for _, conn in ipairs(ESP_Connections) do
+        pcall(conn.Disconnect, conn)
+    end
+    ESP_Connections = {}
+    if ESP_Render then
+        ESP_Render:Disconnect()
+        ESP_Render = nil
+    end
+    if ESP_NPCScan then
+        ESP_NPCScan:Disconnect()
+        ESP_NPCScan = nil
+    end
+    for char in pairs(ESP_Data) do
+        Unregister(char, true)
+    end
+end
+
+-- API 테이블 반환
+return {
+    Start = Start,
+    Stop = Stop,
+    ESP = ESP,
+}
