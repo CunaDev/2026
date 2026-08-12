@@ -88,16 +88,16 @@ local function Colorize(lib, color)
     end
 end
 
-local function BoxSize(ui, cx, cy, halfW, halfH)
-    ui.black.PointA = Vector2.new(cx + halfW + 1, cy - halfH - 1)
-    ui.black.PointB = Vector2.new(cx - halfW - 1, cy - halfH - 1)
-    ui.black.PointC = Vector2.new(cx - halfW - 1, cy + halfH + 1)
-    ui.black.PointD = Vector2.new(cx + halfW + 1, cy + halfH + 1)
+local function BoxSizeImpl(ui, cx, cy, hw, hh)
+    ui.black.PointA = Vector2.new(cx + hw + 1, cy - hh - 1)
+    ui.black.PointB = Vector2.new(cx - hw - 1, cy - hh - 1)
+    ui.black.PointC = Vector2.new(cx - hw - 1, cy + hh + 1)
+    ui.black.PointD = Vector2.new(cx + hw + 1, cy + hh + 1)
 
-    ui.box.PointA = Vector2.new(cx + halfW, cy - halfH)
-    ui.box.PointB = Vector2.new(cx - halfW, cy - halfH)
-    ui.box.PointC = Vector2.new(cx - halfW, cy + halfH)
-    ui.box.PointD = Vector2.new(cx + halfW, cy + halfH)
+    ui.box.PointA = Vector2.new(cx + hw, cy - hh)
+    ui.box.PointB = Vector2.new(cx - hw, cy - hh)
+    ui.box.PointC = Vector2.new(cx - hw, cy + hh)
+    ui.box.PointD = Vector2.new(cx + hw, cy + hh)
 end
 
 local function GetColor(plr)
@@ -168,38 +168,22 @@ local function Start()
                 continue
             end
 
-            -- Estimate full character height in 3D
-            -- Head to root is roughly 40% of full height
-            local headToRoot3D = (head.Position - root.Position).Magnitude
-            local fullHeight = headToRoot3D * 2.5
+            -- Screen-space approach: measure head-to-root on screen
+            local headScreen = camera:WorldToViewportPoint(head.Position)
+            local rootScreen = camera:WorldToViewportPoint(root.Position)
+            local distY = math.clamp(math.abs(headScreen.Y - rootScreen.Y), 2, math.huge)
 
-            -- Top of character (above head)
-            local topPos = head.Position + Vector3.new(0, fullHeight * 0.15, 0)
-            -- Bottom of character (feet)
-            local botPos = head.Position - Vector3.new(0, fullHeight * 0.85, 0)
-
-            -- Project to screen
-            local topScreen, topOn = camera:WorldToViewportPoint(topPos)
-            local botScreen, botOn = camera:WorldToViewportPoint(botPos)
-            local rootScreen, rootOn = camera:WorldToViewportPoint(root.Position)
-            rootOn = rootOn -- keep, fallback check below
-
-            if not topOn and not botOn then
-                for _, d in pairs(ui) do d.Visible = false end
-                continue
-            end
-
-            -- Box center = midpoint of top and bottom on screen
-            local boxCY = (topScreen.Y + botScreen.Y) / 2
+            -- Box center between head and root
             local boxCX = rootScreen.X
-            local boxHalfH = math.abs(topScreen.Y - botScreen.Y) / 2
-            local boxHalfW = boxHalfH * 0.38
+            local boxCY = (headScreen.Y + rootScreen.Y) / 2
+            local boxHalfH = distY * 1.35
+            local boxHalfW = boxHalfH * 0.5
 
-            -- Minimum size at distance
-            local minHalfH = math.clamp(800 / dist, 6, 60)
-            if boxHalfH < minHalfH then
-                boxHalfH = minHalfH
-                boxHalfW = boxHalfH * 0.38
+            -- At distance, minimum visible box (centered on head/root midpoint)
+            local minH = 25
+            if boxHalfH < minH then
+                boxHalfH = minH
+                boxHalfW = minH * 0.5
             end
 
             local color = GetColor(plr)
@@ -213,7 +197,7 @@ local function Start()
 
             -- Box
             if ESP.Boxes then
-                BoxSize(ui, boxCX, boxCY, boxHalfW, boxHalfH)
+                BoxSizeImpl(ui, boxCX, boxCY, boxHalfW, boxHalfH)
                 ui.box.Color = color
                 ui.black.Visible = true
                 ui.box.Visible = true
