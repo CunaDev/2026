@@ -1,4 +1,4 @@
--- PlayerRadar - Module
+-- PlayerRadar - Module (Fixed: team color, stop cleanup)
 -- API: { Start(), Stop(), Radar = { settings = { ... } } }
 
 local Players = game:GetService("Players")
@@ -15,22 +15,23 @@ local Radar = {
       scale = 1,
       teamcheck = false,
       teamcolor = true,
+      healthcolor = false,
       background = Color3.fromRGB(10, 10, 10),
       border = Color3.fromRGB(75, 75, 75),
       enemycolor = Color3.fromRGB(255, 0, 0),
       teamcolor_friendly = Color3.fromRGB(0, 255, 0),
       teamcolor_enemy = Color3.fromRGB(255, 0, 0),
       localdot = Color3.fromRGB(255, 255, 255),
-      healthcolor = true,
       position = Vector2.new(200, 200),
    }
 }
 
-local LerpColorModule = loadstring(game:HttpGet("https://pastebin.com/raw/wRnsJeid"))()
+local LerpColorModule = loadstring(game:HttpGet("https://raw.githubusercontent.com/CunaDev/2026/refs/heads/main/ESPRBX/Color"))()
 local HealthBarLerp = LerpColorModule:Lerp(Color3.fromRGB(255, 0, 0), Color3.fromRGB(0, 255, 0))
 
 local Connections = {}
 local Drawings = {}
+local ActiveDots = {}  -- { dot, getConn }
 local Dragging = false
 local DragOffset = Vector2.new(0, 0)
 local RadarRunning = false
@@ -66,10 +67,13 @@ local function PlaceDot(plr)
 
    local function Update()
       c = RunService.RenderStepped:Connect(function()
+         if not RadarRunning then
+            dot.Visible = false
+            return
+         end
          local char = plr.Character
          local hum = char and char:FindFirstChildOfClass("Humanoid")
          if char and hum and char.PrimaryPart and hum.Health > 0 then
-            -- Team Check (hide same team)
             if Radar.settings.teamcheck and plr.TeamColor == Player.TeamColor then
                dot.Visible = false
                return
@@ -79,7 +83,6 @@ local function PlaceDot(plr)
             local relx, rely = GetRelative(char.PrimaryPart.Position)
             local newpos = Radar.settings.position - Vector2.new(relx * scale, rely * scale)
 
-            -- Determine color
             local dotColor = Radar.settings.enemycolor
             if Radar.settings.teamcolor then
                if plr.TeamColor == Player.TeamColor then
@@ -116,6 +119,12 @@ local function PlaceDot(plr)
       end)
    end
    coroutine.wrap(Update)()
+
+   -- Track this dot so Stop() can remove it
+   table.insert(ActiveDots, {
+      dot = dot,
+      getConn = function() return c end,
+   })
 end
 
 local function NewLocalDot()
@@ -130,12 +139,21 @@ local function NewLocalDot()
    return d
 end
 
+local function RemoveAllDots()
+   for _, data in ipairs(ActiveDots) do
+      if data.dot then pcall(data.dot.Remove, data.dot) end
+      local conn = data.getConn and data.getConn()
+      if conn then pcall(conn.Disconnect, conn) end
+   end
+   ActiveDots = {}
+end
+
 local function Start()
    if RadarRunning then return end
    RadarRunning = true
    Drawings = {}
+   ActiveDots = {}
 
-   -- Background
    local bg = NewCircle(0.9, Radar.settings.background, Radar.settings.radius, true, 1)
    bg.Visible = true
    bg.Position = Radar.settings.position
@@ -146,17 +164,14 @@ local function Start()
    border.Position = Radar.settings.position
    Drawings.border = border
 
-   -- Player dots
    for _, v in pairs(Players:GetChildren()) do
       if v.Name ~= Player.Name then
          PlaceDot(v)
       end
    end
 
-   -- Local player dot
    Drawings.localdot = NewLocalDot()
 
-   -- Player added/removed
    table.insert(Connections, Players.PlayerAdded:Connect(function(v)
       if v.Name ~= Player.Name then
          PlaceDot(v)
@@ -173,9 +188,9 @@ local function Start()
       end
    end))
 
-   -- Loop: update local dot + background
    local loop
    loop = RunService.RenderStepped:Connect(function()
+      if not RadarRunning then return end
       if Drawings.localdot then
          Drawings.localdot.Color = Radar.settings.localdot
          Drawings.localdot.PointA = Radar.settings.position + Vector2.new(0, -6)
@@ -195,7 +210,6 @@ local function Start()
    end)
    table.insert(Connections, loop)
 
-   -- Draggable
    local inset = GuiService:GetGuiInset()
    table.insert(Connections, UIS.InputBegan:Connect(function(input)
       if input.UserInputType == Enum.UserInputType.MouseButton1
@@ -210,9 +224,9 @@ local function Start()
       end
    end))
 
-   -- Mouse hover dot + drag update
    local hover
    hover = RunService.RenderStepped:Connect(function()
+      if not RadarRunning then return end
       if (Vector2.new(Mouse.X, Mouse.Y + inset.Y) - Radar.settings.position).Magnitude < Radar.settings.radius then
          if not Drawings.hover then
             Drawings.hover = NewCircle(1, Color3.fromRGB(255, 255, 255), 3, true, 1)
@@ -236,6 +250,7 @@ local function Stop()
       pcall(conn.Disconnect, conn)
    end
    Connections = {}
+   RemoveAllDots()
    for _, d in pairs(Drawings) do
       pcall(d.Remove, d)
    end
