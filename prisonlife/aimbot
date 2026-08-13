@@ -1,1 +1,587 @@
+local AimBot = {}
+AimBot.__index = AimBot
 
+-- 서비스 ----------------------------------------------------------------------
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer      = Players.LocalPlayer
+local Camera           = workspace.CurrentCamera
+
+local G      = getgenv() or _G
+local Wait   = task.wait
+local Time   = os.clock
+
+-- 히트박스 부위 매핑 ------------------------------------------------------------
+local HITBOX_PARTS = {
+    head  = { "Head" },
+    chest = { "HumanoidRootPart", "UpperTorso", "LowerTorso", "Torso" },
+    legs  = { "HumanoidRootPart", "RightUpperLeg", "LeftUpperLeg", "RightLowerLeg", "LeftLowerLeg" },
+}
+
+-- 조준 키 매핑 --------------------------------------------------------------------
+local AIM_KEY_TYPES = {
+    ["Mouse Left"]   = Enum.UserInputType.MouseButton1,
+    ["Mouse Right"]  = Enum.UserInputType.MouseButton2,
+    ["Mouse Middle"] = Enum.UserInputType.MouseButton3,
+    ["Keyboard"]     = nil,
+}
+
+-- 기본 플래그 ----------------------------------------------------------------------
+local DEFAULT_FLAGS = {
+    ["aimbot_enabled"]           = false,
+    ["aimbot_Teamcheck"]         = true,
+    ["aimbot_Wallcheck"]         = true,
+    ["Aimbot Mode"]              = "Normal",
+    ["AAimbot Key"]              = "Mouse Right",
+    ["KB key"]                   = Enum.KeyCode.E,
+    ["aimbot_smooth"]            = 10,
+    ["aimbot_missspread"]        = 10,
+    ["aimbot_fov"]               = 10,
+    ["aimbot_maxdist"]           = 1500,
+    ["aimbot_hitbox"]            = "head",
+    ["aimbot_target_priority"]   = "Distance",  -- Normal/Silent/Blatant 공용
+    -- Blatant Silent Aim 섹션 (히트박스만 별도 유지)
+    ["Blatantaimbot_enabled"]    = false,
+    ["Blatantaimbot_fov"]        = 10,
+    ["Blatantaimbot_maxdist"]    = 1500,
+    ["Blatantaimbot_teamcheck"]  = true,
+    ["Blatantaimbot_wallbang"]   = false,
+    ["Blatantaimbot_hitbox"]     = "head",
+    ["Blatantaimbot_autofire"]   = true,
+}
+
+local function GetFlag(name)
+    local f = G.library and G.library.flags and G.library.flags[name]
+    if f ~= nil then return f end
+    return DEFAULT_FLAGS[name]
+end
+
+local function GetFlagAny(list)
+    for _, name in ipairs(list) do
+        local f = GetFlag(name)
+        if f ~= nil then return f end
+    end
+    return nil
+end
+
+local function Clamp(v, lo, hi)
+    return math.max(lo, math.min(hi, v))
+end
+
+local realMouse = LocalPlayer:GetMouse()
+
+local function GetMousePos()
+    local ok, v = pcall(function() return UserInputService:GetMouseLocation() end)
+    if ok then return v end
+    return Vector2.new(realMouse.X, realMouse.Y)
+end
+
+local function CharOf(player) return player.Character end
+
+local function AliveHumanoid(player)
+    local char = CharOf(player)
+    if not char then return nil end
+    local hum = char:FindFirstChildOfClass("Humanoid") or char:FindFirstChild("Humanoid")
+    if not hum or hum.Health <= 0 then return nil end
+    local ok, state = pcall(function() return hum:GetState() end)
+    if ok and state == Enum.HumanoidStateType.Dead then return nil end
+    return hum
+end
+
+local function IsValidPlayer(p)
+    return p ~= nil and p ~= LocalPlayer and CharOf(p) and AliveHumanoid(p)
+end
+
+-- 팀 체크 (Prison Life 기본 Team / TeamColor) -------------------------------------
+local function IsEnemy(player)
+    if not player or player == LocalPlayer then return false end
+    if not CharOf(player) then return false end
+    local lp = LocalPlayer
+    if player.Team ~= nil and lp.Team ~= nil and player.Team == lp.Team then
+        return false
+    end
+    if player.TeamColor ~= nil and lp.TeamColor ~= nil
+        and player.TeamColor == lp.TeamColor then
+        return false
+    end
+    return true
+end
+
+-- 벽 체크 ---------------------------------------------------------------------------
+local function RaycastVisible(origin, part, allowWallbang, wallcheck)
+    if allowWallbang or not wallcheck then return true end
+    local lpChar = CharOf(LocalPlayer)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Blacklist
+    params.FilterDescendantsInstances = { lpChar, workspace.CurrentCamera }
+    local result = workspace:Raycast(origin, part.Position - origin, params)
+    if not result then return true end
+    return result.Instance:IsDescendantOf(part.Parent)
+end
+
+-- 히트박스 파트 -----------------------------------------------------------------------
+local function GetHitboxPart(character, key)
+    for _, name in ipairs(HITBOX_PARTS[key] or HITBOX_PARTS.head) do
+        local part = character:FindFirstChild(name)
+        if part then return part end
+    end
+    return character:FindFirstChild("HumanoidRootPart")
+        or character:FindFirstChild("Head")
+end
+
+-- Hurttime 트래커 (Target Priority = Hurttime) ---------------------------------------
+local HurtTime = {}
+
+local function TrackHurt(player)
+    if HurtTime[player] then return end
+    local hum = AliveHumanoid(player)
+    if not hum then return end
+    local entry = { time = 0, lastHealth = hum.Health, conn = nil }
+    HurtTime[player] = entry
+    entry.conn = hum.HealthChanged:Connect(function(newHealth)
+        if newHealth < entry.lastHealth then
+            entry.time = Time()
+        end
+        entry.lastHealth = newHealth
+    end)
+end
+
+-- ================================================================================
+-- 타겟 파인더 (공통)
+--   opts : keytype(조준키인지) / blatant(블라전트인지)
+-- ================================================================================
+local function FindTarget(opts)
+    opts = opts or {}
+
+    local teamcheck = opts.teamcheck
+    if teamcheck == nil then teamcheck = GetFlag("aimbot_Teamcheck") end
+
+    local wallcheck      = GetFlag("aimbot_Wallcheck")
+    local allowWallbang  = opts.wallbang
+    if allowWallbang == nil then allowWallbang = GetFlag("Blatantaimbot_wallbang") end
+
+    local hitKey = opts.hitKey or tostring(GetFlag("aimbot_hitbox"))
+    local fovRatio = Clamp(tonumber(GetFlag("aimbot_fov")) or 10, 0, 10) / 10
+    local maxDist  = tonumber(GetFlag("aimbot_maxdist")) or 1500
+
+    -- Blatant 전용 fov/dist 플래그가 나중에 생기면 우선 사용
+    local bFov = GetFlagAny({ "Blatantaimbot_fov", "aimbot_fov" })
+    local bDist = GetFlagAny({ "Blatantaimbot_maxdist", "aimbot_maxdist" })
+    if opts.blatant then
+        fovRatio = Clamp(tonumber(bFov) or 10, 0, 10) / 10
+        maxDist  = tonumber(bDist) or 1500
+    end
+
+    local origin   = Camera.CFrame.Position
+    local mousePos = GetMousePos()
+    local radius   = fovRatio * math.min(Camera.ViewportSize.X, Camera.ViewportSize.Y) * 0.5
+
+    local priority = tostring(GetFlag("aimbot_target_priority"))
+    local best, bestScore = nil, math.huge
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if not IsValidPlayer(p) then continue end
+        if teamcheck and not IsEnemy(p) then continue end
+
+        local char = CharOf(p)
+        local hum  = AliveHumanoid(p)
+        if not char or not hum then continue end
+
+        local dist = (char:GetPivot().Position - origin).Magnitude
+        if dist > maxDist then continue end
+
+        local part = GetHitboxPart(char, hitKey)
+        if not part then continue end
+        if not RaycastVisible(origin, part, allowWallbang, wallcheck) then continue end
+
+        local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
+        if not onScreen then continue end
+        local screenDist = (mousePos - Vector2.new(sp.X, sp.Y)).Magnitude
+        if screenDist > radius then continue end
+
+        local score
+        if priority == "Health" then
+            score = hum.Health
+        elseif priority == "Hurttime" then
+            TrackHurt(p)
+            score = -((HurtTime[p] and HurtTime[p].time) or 0)
+        elseif priority == "Items" then
+            local count = 0
+            for _, ch in ipairs(char:GetChildren()) do
+                if ch:IsA("Tool") or ch:IsA("Backpack") then count = count + 1 end
+            end
+            score = -count * 100 - dist * 0.001
+        else -- Distance
+            score = dist + screenDist * 0.001
+        end
+
+        if score < bestScore then
+            best, bestScore = p, score
+        end
+    end
+
+    return best
+end
+
+-- 조준 키 상태 ------------------------------------------------------------------------
+local function AimKeyHeld()
+    local keyName = tostring(GetFlag("AAimbot Key"))
+    if keyName == "Keyboard" then
+        local kb = GetFlag("KB key")
+        if type(kb) == "string" then kb = Enum.KeyCode[kb] end
+        return kb ~= nil and UserInputService:IsKeyDown(kb)
+    end
+    local t = AIM_KEY_TYPES[keyName]
+    return t ~= nil and UserInputService:IsMouseButtonPressed(t)
+end
+
+-- 전투 장착 무기 ------------------------------------------------------------------------
+local function CurrentTool()
+    local char = CharOf(LocalPlayer)
+    if not char then return nil end
+    local equipped = char:FindFirstChildOfClass("Tool")
+    if equipped then return equipped end
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if backpack then return backpack:FindFirstChildOfClass("Tool") end
+    return nil
+end
+
+-- ================================================================================
+-- [1] NORMAL — 마우스 포인터 고정 (smooth 적용)
+-- ================================================================================
+local mousemoverel  = G.mousemoverel
+local mousemoveabs  = G.mousemoveabs
+
+local function NormalLock()
+    if not AimKeyHeld() then return end
+
+    local smooth = Clamp(tonumber(GetFlag("aimbot_smooth")) or 10, 0, 10) / 10
+    local target = FindTarget({})
+    if not target then return end
+
+    local part = GetHitboxPart(CharOf(target), tostring(GetFlag("aimbot_hitbox")))
+    if not part then return end
+
+    local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
+    if not onScreen then return end
+
+    local mousePos = GetMousePos()
+    local delta = (Vector2.new(sp.X, sp.Y) - mousePos) * smooth
+
+    if mousemoverel then
+        mousemoverel(delta.X, delta.Y)
+    elseif mousemoveabs then
+        mousemoveabs(mousePos.X + delta.X, mousePos.Y + delta.Y)
+    end
+end
+
+-- ================================================================================
+-- [2] SILENT — 조준 방향 훅 (화면 고정, 탄도만 변조, miss spread 적용)
+-- [3] BLATANT — 매직 불릿 (100% 명중, miss spread 미적용, wallbang 지원)
+-- ================================================================================
+local SilentState = {
+    aimPart   = nil,
+    aimPoint  = Vector3.new(),
+    missOffset = Vector3.new(),
+    lastRoll  = 0,
+}
+
+-- Miss spread : 10 = 100%(변조 보정 없음), 5 = 절반 확률로 넓게 빗나감
+local function RollMissSpread(distance)
+    local spread = Clamp(tonumber(GetFlag("aimbot_missspread")) or 10, 0, 10) / 10
+    if spread >= 1 then
+        SilentState.missOffset = Vector3.new()
+        return
+    end
+    if math.random() < (1 - spread) then
+        local radius = (0.35 + distance * 0.0025) * (1 - spread)
+        local ang = math.random() * math.pi * 2
+        local rad = math.random() * radius
+        SilentState.missOffset = Vector3.new(
+            math.cos(ang) * rad,
+            (math.random() - 0.5) * radius * 1.6,
+            math.sin(ang) * rad
+        )
+    else
+        SilentState.missOffset = Vector3.new()
+    end
+end
+
+-- 현재 모드에 맞는 변조 CFrame 계산 (훅이 읽는 시점에 호출됨)
+local function ComputeAimCF()
+    local mode = tostring(GetFlag("Aimbot Mode"))
+    local enabled = GetFlag("aimbot_enabled")
+    if not enabled then return nil end
+    local keyHeld = AimKeyHeld()
+
+    -- 타겟 우선순위는 aimbot_target_priority 공용 (세 모드 동일)
+    -- 히트박스는 각 모드별 플래그 사용 (aimbot_hitbox / Blatantaimbot_hitbox)
+
+    -- 1) Blatant magic bullet : 토글로 독립 발동, 키 불필요, 가장 우선
+    --    모드(Normal/Silent)와 무관하게 항상 활성 가능
+    if GetFlag("Blatantaimbot_enabled") then
+        local target = FindTarget({
+            blatant   = true,
+            hitKey    = tostring(GetFlag("Blatantaimbot_hitbox")),
+            teamcheck = GetFlag("Blatantaimbot_teamcheck"),
+            wallbang  = GetFlag("Blatantaimbot_wallbang"),
+        })
+        if target then
+            local part = GetHitboxPart(CharOf(target), tostring(GetFlag("Blatantaimbot_hitbox")))
+            if part then
+                -- 매직 불릿 : miss spread 무시, 100% 확정 타격
+                SilentState.aimPart  = part
+                SilentState.aimPoint = part.Position
+                local origin = Camera.CFrame.Position
+                return CFrame.lookAt(origin, SilentState.aimPoint)
+            end
+        end
+    end
+
+    -- 2) Silent : 키 홀드 동안, miss spread 적용
+    --    (Blatant가 활성이면 위에서 이미 반환됨 — Silent는 그 다음 우선순위)
+    if mode == "Silent" and keyHeld then
+        local target = FindTarget({ hitKey = tostring(GetFlag("aimbot_hitbox")) })
+        if target then
+            local part = GetHitboxPart(CharOf(target), tostring(GetFlag("aimbot_hitbox")))
+            if part then
+                local origin = Camera.CFrame.Position
+                local dist = (part.Position - origin).Magnitude
+                if Time() - SilentState.lastRoll > 0.1 then
+                    RollMissSpread(dist)
+                    SilentState.lastRoll = Time()
+                end
+                SilentState.aimPart  = part
+                SilentState.aimPoint = part.Position + SilentState.missOffset
+                return CFrame.lookAt(origin, SilentState.aimPoint)
+            end
+        end
+    end
+
+    return nil
+end
+
+-- Mouse __index 훅 : 게임 스크립트가 Hit / UnitRay / Target 읽을 때 변조 ------------
+local hookMeta, newCClosure, checkCaller = G.hookmetamethod, G.newcclosure, G.checkcaller
+local hooked = false
+local oldIndex = nil
+
+local function InstallHook()
+    if hooked then return true end
+    if not (hookMeta and newCClosure and checkCaller) then
+        warn("[AimBot] hookmetamethod 미지원 익스큐터 — Silent/Blatant 불가. Normal만 동작.")
+        return false
+    end
+
+    oldIndex = hookMeta(game, "__index", newCClosure(function(self, key)
+        if checkCaller() then return oldIndex(self, key) end
+
+        if key == "Hit" or key == "UnitRay" or key == "Target" then
+            local isMouse = pcall(function()
+                return typeof(self) == "Instance" and self == realMouse
+            end)
+            if isMouse then
+                local cf = ComputeAimCF()
+                if cf then
+                    if key == "Hit" then
+                        return cf
+                    elseif key == "UnitRay" then
+                        return Ray.new(cf.Position, cf.LookVector * math.huge)
+                    elseif key == "Target" then
+                        local part = SilentState.aimPart
+                        if part and part.Parent then return part end
+                    end
+                end
+            end
+        end
+        return oldIndex(self, key)
+    end))
+
+    hooked = true
+    return true
+end
+
+local function RemoveHook()
+    if hooked and oldIndex then
+        pcall(function() hookMeta(game, "__index", oldIndex) end)
+    end
+    hooked = false
+    oldIndex = nil
+end
+
+-- ================================================================================
+-- [3] BLATANT — 킬아우라식 자동 공격 (매직 불릿 상시 조준 중 자동 발사)
+-- ================================================================================
+local nextFireAt = 0
+
+local function BlatantAutoFire()
+    if not GetFlag("Blatantaimbot_autofire") then return end
+    if not GetFlag("aimbot_enabled") then return end
+    if not GetFlag("Blatantaimbot_enabled") then return end
+
+    -- 타겟이 있어야 자동사격
+    local target = FindTarget({
+        blatant   = true,
+        hitKey    = tostring(GetFlag("Blatantaimbot_hitbox")),
+        teamcheck = GetFlag("Blatantaimbot_teamcheck"),
+        wallbang  = GetFlag("Blatantaimbot_wallbang"),
+    })
+    if not target then return end
+
+    local tool = CurrentTool()
+    if not tool then return end
+
+    -- 재장전/쿨다운이면 스킵 (대부분 Tool 메서드, 없으면 무시)
+    local usable = pcall(function()
+        return not tool:IsA("Tool") or tool:CanBeUsed()
+    end)
+    if usable and not pcall(function() return tool.CanBeUsed end) then return end
+
+    if Time() < nextFireAt then return end
+    nextFireAt = Time() + 0.11 -- 대략 초당 9발
+
+    -- 가상 좌클릭 : 탄도는 훅이 타겟으로 이미 변조함
+    local VIM = game:GetService("VirtualInputManager")
+    local mp  = GetMousePos()
+    VIM:SendMouseButtonEvent(mp.X, mp.Y, 0, true, game, 1)
+    Wait(0.05)
+    VIM:SendMouseButtonEvent(mp.X, mp.Y, 0, false, game, 1)
+
+    -- 도구 Activate 우회 (VirtualInput 적용 안 되는 무기 대비)
+    pcall(function()
+        if tool:IsA("Tool") then tool:Activate() end
+    end)
+end
+
+-- 발사 입력 시 miss spread 즉석 리롤 (Silent 정확도 체감용) -------------------------
+local function OnInputBegan(input, gameProcessed)
+    if gameProcessed then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+    if not GetFlag("aimbot_enabled") then return end
+    if tostring(GetFlag("Aimbot Mode")) ~= "Silent" then return end
+
+    local part = SilentState.aimPart
+    if not part then return end
+    local dist = (part.Position - Camera.CFrame.Position).Magnitude
+    RollMissSpread(dist)
+    SilentState.lastRoll = Time()
+end
+
+-- FOV 서클 --------------------------------------------------------------------------
+local normalCircle = nil
+local blatantCircle = nil
+
+local function UpdateCircle(circle, color, fov, visible)
+    if not circle then return end
+    circle.Position = GetMousePos()
+    circle.Radius = fov * math.min(Camera.ViewportSize.X, Camera.ViewportSize.Y) * 0.5
+    circle.Color = color
+    circle.Visible = visible
+end
+
+local function EnsureCircles()
+    if not normalCircle then
+        local okc = pcall(function()
+            normalCircle = Drawing.new("Circle")
+            normalCircle.Thickness = 1.5
+            normalCircle.NumSides = 64
+            normalCircle.Color = Color3.fromRGB(255, 70, 70)
+            normalCircle.Transparency = 1
+            normalCircle.Filled = false
+        end)
+        if not okc then normalCircle = nil end
+    end
+    if not blatantCircle then
+        local okc = pcall(function()
+            blatantCircle = Drawing.new("Circle")
+            blatantCircle.Thickness = 2
+            blatantCircle.NumSides = 64
+            blatantCircle.Color = Color3.fromRGB(255, 200, 40)
+            blatantCircle.Transparency = 1
+            blatantCircle.Filled = false
+        end)
+        if not okc then blatantCircle = nil end
+    end
+end
+
+-- ================================================================================
+-- 라이프사이클
+-- ================================================================================
+local connections = {}
+local active = false
+
+function AimBot.Start()
+    if active then return end
+    active = true
+
+    EnsureCircles()
+    if not InstallHook() then
+        warn("[AimBot] Silent/Blatant 비활성 — Normal만 사용 가능")
+    end
+
+    for _, p in ipairs(Players:GetPlayers()) do TrackHurt(p) end
+
+    local render = RunService.RenderStepped:Connect(function()
+        if not active then return end
+
+        local enabled = GetFlag("aimbot_enabled")
+        local mode = tostring(GetFlag("Aimbot Mode"))
+        local fovRatio = Clamp(tonumber(GetFlag("aimbot_fov")) or 10, 0, 10) / 10
+        local bFovRatio = Clamp(tonumber(GetFlagAny({ "Blatantaimbot_fov", "aimbot_fov" })) or 10, 0, 10) / 10
+
+        if enabled and mode == "Normal" then
+            NormalLock()
+        end
+
+        if enabled then
+            BlatantAutoFire()
+        end
+
+        -- FOV 서클 표시
+        UpdateCircle(normalCircle, Color3.fromRGB(255, 70, 70), fovRatio,
+            enabled and (mode == "Normal" or mode == "Silent"))
+        UpdateCircle(blatantCircle, Color3.fromRGB(255, 200, 40), bFovRatio,
+            enabled and GetFlag("Blatantaimbot_enabled"))
+    end)
+    table.insert(connections, render)
+
+    local input = UserInputService.InputBegan:Connect(OnInputBegan)
+    table.insert(connections, input)
+
+    local pa = Players.PlayerAdded:Connect(TrackHurt)
+    table.insert(connections, pa)
+end
+
+function AimBot.Stop()
+    active = false
+    for _, conn in ipairs(connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    connections = {}
+
+    RemoveHook()
+
+    if normalCircle then
+        pcall(function() normalCircle:Remove() end)
+        normalCircle = nil
+    end
+    if blatantCircle then
+        pcall(function() blatantCircle:Remove() end)
+        blatantCircle = nil
+    end
+
+    for k, v in pairs(HurtTime) do
+        if v.conn then pcall(function() v.conn:Disconnect() end) end
+        HurtTime[k] = nil
+    end
+end
+
+-- UI 토글 "enabled" 켜진 채로 로드되면 자동 시작 ------------------------------------
+task.delay(0.5, function()
+    if GetFlag("aimbot_enabled") then
+        AimBot.Start()
+    end
+end)
+
+return AimBot
