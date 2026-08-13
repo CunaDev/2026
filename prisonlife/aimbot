@@ -1,6 +1,4 @@
 --[[===========================================================================
-    Prison Life — Custom AimBot Module  v3
-    ---------------------------------------------------------------------------
     로드 : local AimBot = loadstring(game:HttpGet("GITHUB_RAW_URL"))() ; AimBot.Start()
     연동 : getgenv().library.flags (PRISONLIFE.lua UI)
 
@@ -60,6 +58,7 @@ local DEFAULT_FLAGS = {
     ["Aimbot Mode"]              = "Normal",
     ["AAimbot Key"]              = "Mouse Right",
     ["KB key"]                   = Enum.KeyCode.E,
+    ["aimbot_key_mode"]          = "Hold",   -- "Hold" | "Toggle"
     ["aimbot_smooth"]            = 6,   -- 높을수록 부드럽게 (10=부드러움, 0=스냅)
     ["aimbot_missspread"]        = 10,
     ["aimbot_fov"]               = 10,
@@ -302,8 +301,10 @@ local function AcquireLock(key, fovRatio, maxDist, opts)
     return lock
 end
 
--- 조준 키 상태 ------------------------------------------------------------------------
-local function AimKeyHeld()
+-- 조준 키 상태 (Hold / Toggle) ----------------------------------------------------
+local aimLocked = false  -- Toggle 모드에서 사용
+
+local function GetKeyHeld()
     local keyName = tostring(GetFlag("AAimbot Key"))
     if keyName == "Keyboard" then
         local kb = GetFlag("KB key")
@@ -312,6 +313,44 @@ local function AimKeyHeld()
     end
     local t = AIM_KEY_TYPES[keyName]
     return t ~= nil and UserInputService:IsMouseButtonPressed(t)
+end
+
+local function AimTriggered()
+    local mode = tostring(GetFlag("aimbot_key_mode"))
+    if mode == "Toggle" then
+        return aimLocked
+    end
+    return GetKeyHeld()
+end
+
+-- 키 입력 처리 (Toggle 모드용)
+local function OnKeyBegan(input, gameProcessed)
+    if gameProcessed then return end
+    if tostring(GetFlag("aimbot_key_mode")) ~= "Toggle" then return end
+    if not GetFlag("aimbot_enabled") then return end
+
+    -- 키/마우스 입력 감지
+    local keyName = tostring(GetFlag("AAimbot Key"))
+    local match = false
+    if keyName == "Keyboard" then
+        local kb = GetFlag("KB key")
+        if type(kb) == "string" then kb = Enum.KeyCode[kb] end
+        if kb and input.KeyCode == kb then match = true end
+    else
+        local t = AIM_KEY_TYPES[keyName]
+        if t and input.UserInputType == t then match = true end
+    end
+
+    if match then
+        aimLocked = not aimLocked
+        -- 토글 on 시 바로 락온 캐시 획득
+        if aimLocked and tostring(GetFlag("Aimbot Mode")) == "Normal" then
+            local fovRatio, maxDist = ResolveTargetSettings(false)
+            AcquireLock("normal", fovRatio, maxDist, {
+                hitKey = tostring(GetFlag("aimbot_hitbox")),
+            })
+        end
+    end
 end
 
 -- 전투 장착 무기 ------------------------------------------------------------------------
@@ -336,7 +375,7 @@ local mousemoveabs = G.mousemoveabs
 local MAX_STEP = 45
 
 local function NormalLock()
-    if not AimKeyHeld() then return end
+    if not AimTriggered() then return end
 
     local fovRatio, maxDist = ResolveTargetSettings(false)
     local lock = AcquireLock("normal", fovRatio, maxDist, {
@@ -415,7 +454,6 @@ local function ComputeAimCF()
     local enabled = GetFlag("aimbot_enabled")
     if not enabled then return nil end
 
-    local keyHeld = AimKeyHeld()
     local origin = Camera.CFrame.Position
 
     -- 1) Blatant magic bullet : 독립 토글, 키 불필요
@@ -437,8 +475,8 @@ local function ComputeAimCF()
         end
     end
 
-    -- 2) Silent : 키 홀드 동안, miss spread 적용
-    if tostring(GetFlag("Aimbot Mode")) == "Silent" and keyHeld then
+    -- 2) Silent : 모드 확인 (AimTriggered는 RenderStepped에서 반영됨)
+    if tostring(GetFlag("Aimbot Mode")) == "Silent" then
         local lock = ValidLock(Locks["silent"]) and Locks["silent"]
         if not lock then
             local fovRatio, maxDist = ResolveTargetSettings(false)
@@ -669,7 +707,7 @@ local function UpdateLockVisual()
         lock = Locks["blatant"]
         color = Color3.fromRGB(255, 200, 40)
     elseif tostring(GetFlag("Aimbot Mode")) == "Silent"
-        and AimKeyHeld() and ValidLock(Locks["silent"]) then
+        and AimTriggered() and ValidLock(Locks["silent"]) then
         lock = Locks["silent"]
     end
 
@@ -733,9 +771,9 @@ function AimBot.Start()
             NormalLock()
         end
 
-        -- Silent : 키 홀드 중 락온 사전 계산 (크로스헤어 표시 + 훅 재사용)
+        -- Silent : AimTriggered() 중 락온 사전 계산 (크로스헤어 표시 + 훅 재사용)
         if mode == "Silent" then
-            if AimKeyHeld() then
+            if AimTriggered() then
                 local fovRatio, maxDist = ResolveTargetSettings(false)
                 AcquireLock("silent", fovRatio, maxDist, {
                     hitKey = tostring(GetFlag("aimbot_hitbox")),
@@ -778,8 +816,11 @@ function AimBot.Start()
     end)
     table.insert(connections, render)
 
-    local input = UserInputService.InputBegan:Connect(OnInputBegan)
-    table.insert(connections, input)
+    local input2 = UserInputService.InputBegan:Connect(function(input, gp)
+        OnKeyBegan(input, gp)
+        OnInputBegan(input, gp)
+    end)
+    table.insert(connections, input2)
 
     local pa = Players.PlayerAdded:Connect(TrackHurt)
     table.insert(connections, pa)
