@@ -1,3 +1,45 @@
+--[[===========================================================================
+    Prison Life — Custom AimBot Module
+    ---------------------------------------------------------------------------
+    로드 방식 : GitHub raw URL 로드 (독립 실행 가능, loadstring 전용)
+        local AimBot = loadstring(game:HttpGet("PASTE_GITHUB_RAW_URL"))()
+        AimBot.Start()
+
+    연동 UI   : PRISONLIFE.lua 의 CunaDev 라이브러리 flags 를 직접 읽음
+        getgenv().library.flags -- 없으면 내부 기본값 폴백
+
+    ---------------------------------------------------------------------------
+    세 가지 무기 (서로 다른 레이어)
+
+    [1] Normal (Aimbot Mode = Normal)
+        - 조준 키를 누르는 동안 마우스 포인터가 타겟에 부드럽게 고정
+        - 1인칭/3인칭 모두 동작 (카메라 기준 월드→스크린 변환)
+        - 설정 : aimbot_smooth (0~10, 10 = 즉시 고정)
+        - 키   : AAimbot Key (좌/우/중간 클릭, Keyboard+KB key)
+
+    [2] Silent (Aimbot Mode = Silent) — Silent aim assist
+        - 화면/카메라 절대 안 움직임. 조준 키를 누르는 동안
+          Mouse.Hit / UnitRay / Target 류 접근을 훅해서
+          총알이 나가는 방향만 타겟으로 변조 (코스메틱)
+        - 상대가 보기엔 평범하게 조준하는 것처럼 보임
+        - 설정 : aimbot_missspread (10 = 무조건 명중, 5 = 2발 중 1발 빗나감)
+                 aimbot_fov / aimbot_maxdist / aimbot_hitbox / 팀·벽체크
+
+    [3] Blatant Silent Aim (별도 섹션) — magic bullet
+        - 매직 불릿 : 총알 100% 확정 타격 (미스 스프레드 적용 안 함)
+        - 킬아우라 스타일 자동 공격 : 타겟 잡으면 자동으로 발사
+        - 벽 관통(wallbang) 지원
+        - 발동 : aimbot_enabled + Blatantaimbot_enabled 토글 (키 불필요)
+        - 독립 설정 : Blatantaimbot_fov / maxdist / teamcheck / wallbang / hitbox
+        - 공용 설정 : aimbot_target_priority (세 모드 동일 우선순위 사용)
+
+    공용 / 독립 요약
+        공용 : aimbot_enabled(마스터), aimbot_target_priority, aimbot_Wallcheck
+        독립 : 히트박스(aimbot_hitbox / Blatantaimbot_hitbox), fov, maxdist,
+               teamcheck, 조준 키, smooth / miss spread
+        동시 동작 : Blatant + Normal/Silent 함께 사용 가능 (Blatant 우선)
+================================================================================]]
+
 local AimBot = {}
 AimBot.__index = AimBot
 
@@ -49,6 +91,9 @@ local DEFAULT_FLAGS = {
     ["Blatantaimbot_wallbang"]   = false,
     ["Blatantaimbot_hitbox"]     = "head",
     ["Blatantaimbot_autofire"]   = true,
+    -- tool:Activate() 직접 호출 여부 (기본 OFF — ClientItemHandler 류
+    -- 아이템 처리 스크립트의 버그 경로를 발동시키는 원인 차단)
+    ["Blatantaimbot_useactivate"] = false,
 }
 
 local function GetFlag(name)
@@ -375,26 +420,26 @@ local function InstallHook()
     end
 
     oldIndex = hookMeta(game, "__index", newCClosure(function(self, key)
+        -- 자기 자신 코드는 원본 그대로
         if checkCaller() then return oldIndex(self, key) end
 
-        if key == "Hit" or key == "UnitRay" or key == "Target" then
-            local isMouse = pcall(function()
-                return typeof(self) == "Instance" and self == realMouse
-            end)
-            if isMouse then
-                local cf = ComputeAimCF()
-                if cf then
-                    if key == "Hit" then
-                        return cf
-                    elseif key == "UnitRay" then
-                        return Ray.new(cf.Position, cf.LookVector * math.huge)
-                    elseif key == "Target" then
-                        local part = SilentState.aimPart
-                        if part and part.Parent then return part end
-                    end
+        -- 우리가 다루는 건 진짜 LocalPlayer Mouse의 Hit/UnitRay/Target 뿐
+        if (key == "Hit" or key == "UnitRay" or key == "Target")
+            and typeof(self) == "Instance" and rawequal(self, realMouse) then
+            -- ComputeAimCF 실패해도 절대 게임 접근을 깨지 않게 방어
+            local ok, cf = pcall(ComputeAimCF)
+            if ok and cf then
+                if key == "Hit" then
+                    return cf
+                elseif key == "UnitRay" then
+                    return Ray.new(cf.Position, cf.LookVector * math.huge)
+                elseif key == "Target" then
+                    local part = SilentState.aimPart
+                    if part and part.Parent then return part end
                 end
             end
         end
+        -- 그 외 모든 접근은 원본으로 패스스루 (멤버 존재 여부는 전부 원본 판정)
         return oldIndex(self, key)
     end))
 
@@ -448,10 +493,14 @@ local function BlatantAutoFire()
     Wait(0.05)
     VIM:SendMouseButtonEvent(mp.X, mp.Y, 0, false, game, 1)
 
-    -- 도구 Activate 우회 (VirtualInput 적용 안 되는 무기 대비)
-    pcall(function()
-        if tool:IsA("Tool") then tool:Activate() end
-    end)
+    -- tool:Activate() 우회 : 기본 OFF
+    -- (켜면 ClientItemHandler 같은 아이템 처리 스크립트의
+    --  죽은 mouse.Position 접근 경로를 발동시켜 에러 로그 유발)
+    if GetFlag("Blatantaimbot_useactivate") then
+        pcall(function()
+            if tool:IsA("Tool") then tool:Activate() end
+        end)
+    end
 end
 
 -- 발사 입력 시 miss spread 즉석 리롤 (Silent 정확도 체감용) -------------------------
