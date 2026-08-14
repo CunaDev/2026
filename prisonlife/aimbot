@@ -1,21 +1,6 @@
 --[[===========================================================================
     Prison Life — Aim Diagnostic Overlay
     ============================================================================
-    안전한 진단 전용 모듈.
-
-    이 파일은 다음을 하지 않는다.
-      * 카메라, 마우스, 키보드 입력 변경
-      * Mouse.Hit / UnitRay / Target 후킹
-      * Camera.CFrame 후킹 또는 대입
-      * workspace.Raycast 교체
-      * VirtualInputManager / Tool:Activate / 자동 발사
-
-    제공 기능.
-      * FOV 시각화
-      * 현재 커서 기준 후보 플레이어 표시
-      * 타겟 이름, 팀, 거리, 체력 표시
-      * Normal / Silent / Blatant 설정을 읽되 공격 동작은 수행하지 않음
-      * Hold / Toggle 입력은 읽지 않음. 게임 상호작용과 충돌하지 않음.
 
     연결.
       PRISONLIFE.lua의 aimbot_enabled 토글이 AimBot.Start()/Stop()을 호출한다.
@@ -118,34 +103,24 @@ local function IsEnemy(player)
     return true
 end
 
-local function HasWantedMarker(player)
+local HOSTILE_ATTRIBUTES = {
+    "EquippedHostileTool",
+    "Hostile",
+    "PunchedSomeone",
+    "Trespassing",
+}
+
+local function HasHostileAttribute(player)
     local character = GetCharacter(player)
-    local humanoid = GetHumanoid(player)
     if not character then
         return false
     end
 
-    -- 현재 게임 규칙 기준: 💢 이모지만 범죄자 표식으로 인정한다.
-    -- 실제 닉네임에 "Wanted"가 포함된 유저는 표식으로 취급하지 않는다.
-    local names = {
-        player.Name,
-        player.DisplayName,
-        character.Name,
-        humanoid and humanoid.Name,
-    }
-    for _, value in ipairs(names) do
-        if type(value) == "string" and value:find("💢", 1, true) then
+    -- Prison Life player model attributes are authoritative for this check.
+    -- Attribute value must be actual boolean true; truthy strings are ignored.
+    for _, attributeName in ipairs(HOSTILE_ATTRIBUTES) do
+        if character:GetAttribute(attributeName) == true then
             return true
-        end
-    end
-
-    -- 머리 위 BillboardGui 등 UI에 표시된 💢만 추가 확인한다.
-    for _, object in ipairs(character:GetDescendants()) do
-        if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then
-            local text = tostring(object.Text or "")
-            if text:find("💢", 1, true) then
-                return true
-            end
         end
     end
 
@@ -165,7 +140,7 @@ local function CanExecute(player)
         return true
     end
 
-    return HasWantedMarker(player)
+    return HasHostileAttribute(player)
 end
 
 local HITBOX_PARTS = {
