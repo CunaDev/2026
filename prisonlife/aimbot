@@ -118,11 +118,46 @@ local function IsEnemy(player)
     return true
 end
 
+local function HasWantedMarker(player)
+    local character = GetCharacter(player)
+    local humanoid = GetHumanoid(player)
+    if not character then
+        return false
+    end
+
+    -- 현재 게임 규칙 기준: 💢 이모지만 범죄자 표식으로 인정한다.
+    -- 실제 닉네임에 "Wanted"가 포함된 유저는 표식으로 취급하지 않는다.
+    local names = {
+        player.Name,
+        player.DisplayName,
+        character.Name,
+        humanoid and humanoid.Name,
+    }
+    for _, value in ipairs(names) do
+        if type(value) == "string" and value:find("💢", 1, true) then
+            return true
+        end
+    end
+
+    -- 머리 위 BillboardGui 등 UI에 표시된 💢만 추가 확인한다.
+    for _, object in ipairs(character:GetDescendants()) do
+        if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then
+            local text = tostring(object.Text or "")
+            if text:find("💢", 1, true) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
 local function CanExecute(player)
     if not GetFlag("prisoner_execute_check") then
         return true
     end
 
+    -- 처형 규칙은 Guards가 Inmates를 대상으로 할 때만 적용.
     if not LocalPlayer.Team or LocalPlayer.Team.Name ~= "Guards" then
         return true
     end
@@ -130,8 +165,7 @@ local function CanExecute(player)
         return true
     end
 
-    local humanoid = GetHumanoid(player)
-    return humanoid and humanoid.Name:find("💢", 1, true) ~= nil
+    return HasWantedMarker(player)
 end
 
 local HITBOX_PARTS = {
