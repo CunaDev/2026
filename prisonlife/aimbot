@@ -2,9 +2,9 @@
     Prison Life — Aim Diagnostic Overlay
     ============================================================================
 
-    연결.
-      PRISONLIFE.lua의 aimbot_enabled 토글이 AimBot.Start()/Stop()을 호출한다.
-      기존 UI 플래그를 읽지만 이름은 호환성 때문에 유지한다.
+    Roblox Prison Life Custom Aimbot 모듈은 PRISONLIFE.lua에서 호출
+    aimbot, Blatant slient 메인 로직 아직 구현 안됨
+    
 ==============================================================================]]
 
 local AimBot = {}
@@ -107,7 +107,7 @@ local HOSTILE_ATTRIBUTES = {
     "EquippedHostileTool",
     "Hostile",
     "PunchedSomeone",
-    "Trespassing",
+  --"Trespassing",
 }
 
 local function HasHostileAttribute(player)
