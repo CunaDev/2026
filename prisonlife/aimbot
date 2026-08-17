@@ -733,6 +733,25 @@ local function GetHealthColor(health, maxHealth)
     end
 end
 
+-- Resolve the executor's Drawing library.
+-- Mirrors the Open Aimbot reference: getfenv() is the executor's environment, so
+-- getfenv().Drawing reaches the library on executors where the plain global is
+-- shadowed. Falls back to the plain global for Luau-compatible environments.
+-- ⚠ MUST be defined BEFORE any function that calls it (Lua forward-reference rule).
+local function GetDrawingLib()
+    local lib = nil
+    if type(getfenv) == "function" then
+        local ok, env = pcall(getfenv)
+        if ok and type(env) == "table" then
+            lib = env.Drawing
+        end
+    end
+    if lib == nil then
+        lib = Drawing
+    end
+    return lib
+end
+
 local function SetupDrawingTracer()
     -- Try to use Drawing library for line rendering (better performance)
     -- Resolve the library the same way the Open Aimbot reference does:
@@ -754,24 +773,6 @@ local function SetupDrawingTracer()
         return true
     end
     return false
-end
-
--- Resolve the executor's Drawing library.
--- Mirrors the Open Aimbot reference: getfenv() is the executor's environment, so
--- getfenv().Drawing reaches the library on executors where the plain global is
--- shadowed. Falls back to the plain global for Luau-compatible environments.
-local function GetDrawingLib()
-    local lib = nil
-    if type(getfenv) == "function" then
-        local ok, env = pcall(getfenv)
-        if ok and type(env) == "table" then
-            lib = env.Drawing
-        end
-    end
-    if lib == nil then
-        lib = Drawing
-    end
-    return lib
 end
 
 local function CreateUI()
@@ -898,8 +899,8 @@ local function CreateUI()
     status.Parent = gui
     ui.status = status
 
-    -- Try to create tracer line
-    SetupDrawingTracer()
+    -- Try to create tracer line (guarded: must never break Start())
+    pcall(SetupDrawingTracer)
 
     -- Debug overlay (hidden by default)
     local debugFrame = Instance.new("Frame")
