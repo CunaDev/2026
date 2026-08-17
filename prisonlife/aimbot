@@ -1,29 +1,30 @@
 --[[===========================================================================
-    Prison Life — Aim Diagnostic Overlay
+    Prison Life — FULL Aimbot LuaU Script
     ============================================================================
 
     Roblox Prison Life Custom Aimbot 모듈은 PRISONLIFE.lua에서 호출
-    aimbot, Blatant slient 메인 로직 아직 구현 안됨
+    Normal aim, Silent aim, Blatant, Triggerbot, Prediction 전부 포함
     
 ==============================================================================]]
 
 local AimBot = {}
 
+-- Services
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local CoreGui = game:GetService("CoreGui")
+local Workspace = game:GetService("Workspace")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local LocalPlayer = Players.LocalPlayer
 
 local function GetEnvironment()
-    if type(getgenv) == "function" then
-        return getgenv()
-    end
+    if type(getgenv) == "function" then return getgenv() end
     return _G
 end
-
 local Environment = GetEnvironment()
 
+-- Default flags
 local DEFAULT_FLAGS = {
     aimbot_enabled = false,
     aimbot_Teamcheck = true,
@@ -38,7 +39,26 @@ local DEFAULT_FLAGS = {
     Blatantaimbot_maxdist = 1500,
     Blatantaimbot_teamcheck = true,
     Blatantaimbot_hitbox = "head",
+    ["aimbot_smooth"] = 4,
+    ["aimbot_missspread"] = 56,
+    ["Aimbot Mode"] = "Normal",
+    ["AAimbot Key"] = "Mouse Right",
+    ["KB key"] = nil,
+    ["aimbot_key_mode"] = "Hold",
 }
+
+-- Module state
+local connection = nil
+local active = false
+local errorReported = false
+local currentTarget = nil
+local targetVelocity = Vector3.new(0, 0, 0)
+local lastPosition = nil
+local lastTime = 0
+local aimKeyHeld = false
+local aimKeyToggled = false
+local silentHookInstalled = false
+local triggerbotCooldown = 0
 
 local function GetFlag(name)
     local library = Environment.library
@@ -52,6 +72,29 @@ end
 
 local function Clamp(value, minimum, maximum)
     return math.max(minimum, math.min(maximum, value))
+end
+
+-- Math helpers
+local function Lerp(a, b, t)
+    return a + (b - a) * t
+end
+
+local function LerpAngle(a, b, t)
+    local diff = b - a
+    if diff > math.pi then
+        diff = diff - 2 * math.pi
+    elseif diff < -math.pi then
+        diff = diff + 2 * math.pi
+    end
+    return a + diff * t
+end
+
+local function VectorLerp(a, b, t)
+    return Vector3.new(
+        Lerp(a.X, b.X, t),
+        Lerp(a.Y, b.Y, t),
+        Lerp(a.Z, b.Z, t)
+    )
 end
 
 local function GetCamera()
@@ -187,13 +230,117 @@ local function GetSettings()
     local hitbox = tostring(GetFlag(blatant and "Blatantaimbot_hitbox" or "aimbot_hitbox"))
     local teamcheck = GetFlag(blatant and "Blatantaimbot_teamcheck" or "aimbot_Teamcheck")
 
+    -- New engine settings from PRISONLIFE.lua
+    local smooth = tonumber(GetFlag("aimbot_smooth")) or 4
+    local missSpread = tonumber(GetFlag("aimbot_missspread")) or 56
+    local aimMode = tostring(GetFlag("Aimbot Mode") or "Normal")
+    local aimKey = tostring(GetFlag("AAimbot Key") or "Mouse Right")
+    local keyMode = tostring(GetFlag("aimbot_key_mode") or "Hold")
+
     return {
         blatant = blatant,
         fov = Clamp(fovValue, 0, 10) / 10,
         maxDistance = math.max(maxDistance, 0),
         hitbox = hitbox,
         teamcheck = teamcheck,
+        smooth = Clamp(smooth, 0, 10),
+        missSpread = Clamp(missSpread, 0, 100),
+        aimMode = aimMode,
+        aimKey = aimKey,
+        keyMode = keyMode,
     }
+end
+
+-- Prediction: track target velocity and lead the shot
+local function UpdatePrediction(part, now)
+    local dt = now - lastTime
+    if dt >= 0.05 and lastPosition then
+        local velocity = (part.Position - lastPosition) / dt
+        -- Exponential smoothing on velocity to avoid jitter
+        targetVelocity = VectorLerp(targetVelocity, velocity, 0.35)
+    else
+        targetVelocity = targetVelocity * 0.9
+    end
+    lastPosition = part.Position
+    lastTime = now
+end
+
+local function GetPredictedPosition(part, settings)
+    if not lastPosition then
+        return part.Position
+    end
+    -- Lead time scales with distance, capped at 0.5 studs per stud of distance
+    local leadTime = Clamp(settings.maxDistance / 300, 0.05, 0.8)
+    local predicted = part.Position + targetVelocity * leadTime
+    -- Keep vertical prediction dampened for ground targets
+    predicted = Vector3.new(predicted.X, part.Position.Y, predicted.Z)
+    return predicted
+end
+
+-- Miss spread: angular random offset proportional to flag (0-100 -> 0-~15 degrees)
+local function ApplyMissSpread(direction, spread, distance)
+    if spread <= 0 then
+        return direction
+    end
+    local maxAngle = math.rad(spread * 0.15) -- 0-100 -> 0-15 deg
+    local theta = math.random() * math.pi * 2
+    local phi = math.acos(2 * math.random() - 1)
+    local offset = Vector3.new(
+        math.sin(phi) * math.cos(theta),
+        math.sin(phi) * math.sin(theta),
+        math.cos(phi)
+    ) * math.tan(maxAngle) * distance
+
+    local displaced = direction * distance + offset
+    return displaced.Unit
+end
+
+-- Key handling ---------------------------------------------------------------
+local KEY_TO_MOUSE = {
+    ["Mouse Left"] = Enum.UserInputType.MouseButton1,
+    ["Mouse Right"] = Enum.UserInputType.MouseButton2,
+    ["Mouse Middle"] = Enum.UserInputType.MouseButton3,
+}
+
+local function GetKeybindKey()
+    local kbFlag = GetFlag("KB key")
+    if type(kbFlag) == "table" then
+        local key = kbFlag.key or kbFlag.Value or kbFlag.Enum
+        if type(key) == "userdata" and typeof(key) == "EnumItem" then
+            return key
+        end
+        if type(key) == "string" then
+            local ok, resolved = pcall(function()
+                return Enum.KeyCode[key]
+            end)
+            if ok and resolved then
+                return resolved
+            end
+        end
+    end
+    return nil
+end
+
+local function IsAimKeyPressed(settings)
+    local key = settings.aimKey
+    local mouseType = KEY_TO_MOUSE[key]
+    if mouseType then
+        return UserInputService:IsMouseButtonPressed(mouseType)
+    end
+    if key == "Keyboard" then
+        local code = GetKeybindKey()
+        if code then
+            return UserInputService:IsKeyDown(code)
+        end
+    end
+    return false
+end
+
+local function ShouldAim(settings)
+    if settings.keyMode == "Toggle" then
+        return aimKeyToggled
+    end
+    return IsAimKeyPressed(settings)
 end
 
 local function ScoreCandidate(candidate, settings, mousePosition, radius)
@@ -205,11 +352,11 @@ local function ScoreCandidate(candidate, settings, mousePosition, radius)
     local healthScore = health / maxHealth
 
     if priority == "Point" then
-        return candidate.screenDistance
+        return -candidate.screenDistance -- higher is better, negate for sort
     elseif priority == "Health" then
-        return health
+        return -health
     elseif priority == "Distance" then
-        return candidate.distance
+        return -candidate.distance
     elseif priority == "Hurttime" then
         return -(candidate.hurtTime or 0)
     elseif priority == "Items" then
@@ -218,8 +365,8 @@ local function ScoreCandidate(candidate, settings, mousePosition, radius)
         return math.random()
     end
 
-    -- Smart: 화면 근접도, 거리, 체력을 함께 고려한다.
-    return pointScore * 0.40 + distanceScore * 0.35 + healthScore * 0.25
+    -- Smart: weighted combination of screen proximity, distance, and health
+    return -(pointScore * 0.40 + distanceScore * 0.35 + healthScore * 0.25)
 end
 
 local function FindBestCandidate()
@@ -233,6 +380,7 @@ local function FindBestCandidate()
     local radius = settings.fov * math.min(camera.ViewportSize.X, camera.ViewportSize.Y) * 0.5
     local origin = camera.CFrame.Position
     local candidates = {}
+    local now = tick()
 
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and IsAlive(player) then
@@ -240,8 +388,11 @@ local function FindBestCandidate()
                 local humanoid = GetHumanoid(player)
                 local part = GetPart(player, settings.hitbox)
                 if humanoid and part then
+                    -- Update prediction for this player
+                    UpdatePrediction(part, now)
+                    local predictedPos = GetPredictedPosition(part, settings)
                     local distance = (part.Position - origin).Magnitude
-                    local screenPoint, onScreen = camera:WorldToViewportPoint(part.Position)
+                    local screenPoint, onScreen = camera:WorldToViewportPoint(predictedPos)
                     local screenDistance = (Vector2.new(screenPoint.X, screenPoint.Y) - mousePosition).Magnitude
 
                     if onScreen and distance <= settings.maxDistance and screenDistance <= radius then
@@ -257,6 +408,7 @@ local function FindBestCandidate()
                                 player = player,
                                 humanoid = humanoid,
                                 part = part,
+                                predictedPosition = predictedPos,
                                 distance = distance,
                                 screenPoint = Vector2.new(screenPoint.X, screenPoint.Y),
                                 screenDistance = screenDistance,
@@ -276,10 +428,159 @@ local function FindBestCandidate()
     end
 
     table.sort(candidates, function(left, right)
-        return left.score < right.score
+        return left.score > right.score -- higher score = better
     end)
 
     return candidates[1], radius
+end
+-- Aim execution ----------------------------------------------------------------
+
+-- Normal aim: smooth camera lerp toward target
+local function ExecuteNormalAim(candidate, camera, settings)
+    local targetPos = candidate.predictedPosition or candidate.part.Position
+    local direction = (targetPos - camera.CFrame.Position).Unit
+    local smooth = settings.smooth
+    local spread = settings.missSpread
+
+    -- Apply miss spread
+    if spread > 0 then
+        direction = ApplyMissSpread(direction, spread, candidate.distance)
+    end
+
+    local lookCF = CFrame.lookAt(camera.CFrame.Position, camera.CFrame.Position + direction * 1000)
+
+    if smooth > 0 then
+        -- Smooth factor: higher smooth = slower rotation
+        local factor = 1 - math.exp(-15 / (smooth + 1) * (RunService.RenderStepped:Wait() or 0.016))
+        camera.CFrame = camera.CFrame:Lerp(lookCF, Clamp(factor, 0, 1))
+    else
+        camera.CFrame = lookCF
+    end
+end
+
+-- Silent aim: install metamethod hook on Raycast to redirect hits
+local function InstallSilentHook()
+    if silentHookInstalled then
+        return
+    end
+
+    local success = pcall(function()
+        local oldHook
+        oldHook = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+
+            -- Intercept raycast calls when aiming is active
+            if method == "Raycast" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRay" then
+                if active and GetFlag("aimbot_enabled") == true and currentTarget then
+                    local settings = GetSettings()
+                    local shouldAim = ShouldAim(settings)
+                    if shouldAim and (settings.aimMode == "Silent" or settings.blatant) then
+                        local targetPos = currentTarget.predictedPosition or currentTarget.part.Position
+                        local camera = GetCamera()
+                        if camera then
+                            local direction = (targetPos - camera.CFrame.Position).Unit
+                            local spread = settings.missSpread
+                            if spread > 0 then
+                                direction = ApplyMissSpread(direction, spread, currentTarget.distance)
+                            end
+
+                            if method == "Raycast" then
+                                local params = RaycastParams.new()
+                                params.FilterType = Enum.RaycastFilterType.Blacklist
+                                params.FilterDescendantsInstances = {
+                                    GetCharacter(LocalPlayer),
+                                    camera,
+                                }
+                                return Workspace:Raycast(
+                                    camera.CFrame.Position,
+                                    direction * (currentTarget.distance + 50),
+                                    params
+                                )
+                            else
+                                -- Legacy FindPartOnRay methods
+                                local args = {...}
+                                local newRay = Ray.new(camera.CFrame.Position, direction * 2000)
+                                args[1] = newRay
+                                return self[method](self, unpack(args))
+                            end
+                        end
+                    end
+                end
+            end
+
+            return self[method](self, ...)
+        end)
+    end)
+
+    if success then
+        silentHookInstalled = true
+    end
+end
+
+-- Triggerbot: auto-fire when locked on target
+local function ExecuteTriggerbot(candidate, now)
+    if not candidate or not GetFlag("aimbot_enabled") then
+        return
+    end
+
+    local settings = GetSettings()
+    if not ShouldAim(settings) then
+        return
+    end
+
+    -- Only trigger in silent or blatant mode
+    if settings.aimMode ~= "Silent" and not settings.blatant then
+        return
+    end
+
+    -- Cooldown to prevent spam
+    if now - triggerbotCooldown < 0.2 then
+        return
+    end
+
+    triggerbotCooldown = now
+
+    -- Simulate mouse click
+    pcall(function()
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, nil, 0)
+        task.wait(0.035)
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, nil, 0)
+    end)
+end
+
+-- Toggle key input handler
+local function OnInputBegan(input, gameProcessed)
+    if gameProcessed then
+        return
+    end
+    if not active or not GetFlag("aimbot_enabled") then
+        return
+    end
+
+    local settings = GetSettings()
+    if settings.keyMode ~= "Toggle" then
+        return
+    end
+
+    local key = settings.aimKey
+    local matches = false
+
+    if key == "Mouse Left" and input.UserInputType == Enum.UserInputType.MouseButton1 then
+        matches = true
+    elseif key == "Mouse Right" and input.UserInputType == Enum.UserInputType.MouseButton2 then
+        matches = true
+    elseif key == "Mouse Middle" and input.UserInputType == Enum.UserInputType.MouseButton3 then
+        matches = true
+    elseif key == "Keyboard" then
+        local code = GetKeybindKey()
+        if code and input.KeyCode == code then
+            matches = true
+        end
+    end
+
+    if matches then
+        aimKeyToggled = not aimKeyToggled
+    end
 end
 
 -- UI ---------------------------------------------------------------------------
@@ -289,6 +590,7 @@ local ui = {
     marker = nil,
     label = nil,
     status = nil,
+    tracer = nil,
 }
 
 local function CreateFrame(parent, color, transparency)
@@ -298,6 +600,32 @@ local function CreateFrame(parent, color, transparency)
     frame.BorderSizePixel = 0
     frame.Parent = parent
     return frame
+end
+
+local function GetHealthColor(health, maxHealth)
+    local ratio = health / math.max(maxHealth, 1)
+    if ratio > 0.7 then
+        return Color3.fromRGB(70, 255, 120) -- green
+    elseif ratio > 0.4 then
+        return Color3.fromRGB(255, 200, 40) -- yellow
+    else
+        return Color3.fromRGB(255, 60, 60) -- red
+    end
+end
+
+local function SetupDrawingTracer()
+    -- Try to use Drawing library for line rendering (better performance)
+    local ok, drawing = pcall(function()
+        return Drawing.new("Line")
+    end)
+    if ok and drawing then
+        ui.tracer = drawing
+        ui.tracer.Thickness = 1.5
+        ui.tracer.Transparency = 0.6
+        ui.tracer.Visible = false
+        return true
+    end
+    return false
 end
 
 local function CreateUI()
@@ -313,26 +641,31 @@ local function CreateUI()
     gui.Parent = CoreGui
     ui.gui = gui
 
+    -- FOV circle
     local fov = CreateFrame(gui, Color3.fromRGB(255, 90, 90), 0.75)
     fov.Name = "FOV"
     fov.BackgroundTransparency = 1
     fov.BorderSizePixel = 2
+    fov.BorderColor3 = Color3.fromRGB(255, 90, 90)
     fov.Visible = false
     local corner = Instance.new("UICorner")
     corner.CornerRadius = UDim.new(1, 0)
     corner.Parent = fov
     ui.fov = fov
 
+    -- Target marker
     local marker = CreateFrame(gui, Color3.fromRGB(70, 255, 120), 0.05)
     marker.Name = "TargetMarker"
     marker.Size = UDim2.fromOffset(8, 8)
     marker.AnchorPoint = Vector2.new(0.5, 0.5)
     marker.Visible = false
+    marker.ZIndex = 10
     local markerCorner = Instance.new("UICorner")
     markerCorner.CornerRadius = UDim.new(1, 0)
     markerCorner.Parent = marker
     ui.marker = marker
 
+    -- Info label
     local label = Instance.new("TextLabel")
     label.Name = "TargetInfo"
     label.BackgroundTransparency = 1
@@ -346,26 +679,33 @@ local function CreateUI()
     label.Parent = gui
     ui.label = label
 
+    -- Status bar
     local status = Instance.new("TextLabel")
     status.Name = "DiagnosticStatus"
     status.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     status.BackgroundTransparency = 0.25
     status.BorderSizePixel = 0
     status.Position = UDim2.fromOffset(12, 12)
-    status.Size = UDim2.fromOffset(360, 28)
+    status.Size = UDim2.fromOffset(480, 28)
     status.Font = Enum.Font.Code
     status.TextSize = 13
     status.TextXAlignment = Enum.TextXAlignment.Left
     status.TextColor3 = Color3.fromRGB(220, 220, 220)
     status.Parent = gui
     ui.status = status
+
+    -- Try to create tracer line
+    SetupDrawingTracer()
 end
 
 local function HideUI()
     if ui.fov then ui.fov.Visible = false end
     if ui.marker then ui.marker.Visible = false end
     if ui.label then ui.label.Visible = false end
-    if ui.status then ui.status.Text = "AIM DIAGNOSTICS  |  OFF" end
+    if ui.tracer then ui.tracer.Visible = false end
+    if ui.status then
+        ui.status.Text = "AIMBOT  |  OFF"
+    end
 end
 
 local function UpdateUI(candidate, radius)
@@ -374,8 +714,11 @@ local function UpdateUI(candidate, radius)
         return
     end
 
+    local settings = GetSettings()
     local mousePosition = GetMousePosition()
     local diameter = radius * 2
+
+    -- FOV circle
     ui.fov.Position = UDim2.fromOffset(mousePosition.X - radius, mousePosition.Y - radius)
     ui.fov.Size = UDim2.fromOffset(diameter, diameter)
     ui.fov.Visible = GetFlag("aimbot_enabled") == true
@@ -383,35 +726,67 @@ local function UpdateUI(candidate, radius)
     if not candidate then
         ui.marker.Visible = false
         ui.label.Visible = false
-        ui.status.Text = "AIM DIAGNOSTICS  |  NO CANDIDATE"
+        if ui.tracer then ui.tracer.Visible = false end
+        ui.status.Text = "AIMBOT  |  NO CANDIDATE"
         return
     end
 
     local point = candidate.screenPoint
+    local healthColor = GetHealthColor(candidate.humanoid.Health, candidate.humanoid.MaxHealth)
+
+    -- Target marker with health-based color
     ui.marker.Position = UDim2.fromOffset(point.X, point.Y)
-    ui.marker.BackgroundColor3 = GetSettings().blatant
+    ui.marker.BackgroundColor3 = settings.blatant
         and Color3.fromRGB(255, 200, 40)
-        or Color3.fromRGB(70, 255, 120)
+        or healthColor
     ui.marker.Visible = true
+
+    -- Info label
+    local aimMode = settings.aimMode
+    if settings.blatant then
+        aimMode = "BLATANT"
+    end
+    local keyState = ""
+    if settings.keyMode == "Toggle" then
+        keyState = aimKeyToggled and " [ON]" or " [OFF]"
+    else
+        keyState = IsAimKeyPressed(settings) and " [HOLD]" or " [--]"
+    end
 
     ui.label.Position = UDim2.fromOffset(point.X, point.Y + 12)
     ui.label.Text = string.format(
-        "%s | %s | %.0f studs | HP %.0f | %s",
+        "[%s] %s | %s | %.0f studs | HP %.0f/%.0f | %s%s",
+        aimMode,
         candidate.player.DisplayName,
         candidate.player.Team and candidate.player.Team.Name or "NoTeam",
         candidate.distance,
         candidate.humanoid.Health,
-        tostring(GetFlag("aimbot_target_priority"))
+        candidate.humanoid.MaxHealth,
+        tostring(GetFlag("aimbot_target_priority")),
+        keyState
     )
     ui.label.Visible = true
-    ui.status.Text = "AIM DIAGNOSTICS  |  TARGET CANDIDATE"
+
+    -- Tracer from crosshair to target
+    if ui.tracer then
+        local viewport = camera.ViewportSize
+        local center = Vector2.new(viewport.X * 0.5, viewport.Y * 0.5)
+        ui.tracer.From = Vector2.new(center.X, center.Y)
+        ui.tracer.To = Vector2.new(point.X, point.Y)
+        ui.tracer.Color = healthColor
+        ui.tracer.Visible = true
+    end
+
+    ui.status.Text = string.format(
+        "AIMBOT  |  %s  |  %s  |  SMOOTH %.1f  |  SPREAD %.0f%%",
+        aimMode,
+        candidate.player.DisplayName,
+        settings.smooth,
+        settings.missSpread
+    )
 end
 
 -- 라이프사이클 -------------------------------------------------------------------
-local connection = nil
-local active = false
-local errorReported = false
-
 function AimBot.Start()
     if active then
         return
@@ -419,7 +794,27 @@ function AimBot.Start()
 
     active = true
     errorReported = false
+    aimKeyToggled = false
+    currentTarget = nil
+    targetVelocity = Vector3.new(0, 0, 0)
+    lastPosition = nil
+    lastTime = 0
+    triggerbotCooldown = 0
+
     CreateUI()
+
+    -- Install silent aim hook if needed
+    local settings = GetSettings()
+    if settings.aimMode == "Silent" or settings.blatant then
+        InstallSilentHook()
+    end
+
+    -- Register input handler for toggle mode
+    local inputConnection
+    inputConnection = UserInputService.InputBegan:Connect(function(input, gpe)
+        if gpe then return end
+        OnInputBegan(input, gpe)
+    end)
 
     connection = RunService.RenderStepped:Connect(function()
         if not active then
@@ -429,26 +824,77 @@ function AimBot.Start()
         local ok, err = xpcall(function()
             if GetFlag("aimbot_enabled") ~= true then
                 HideUI()
+                currentTarget = nil
                 return
             end
 
+            local settings = GetSettings()
+            local camera = GetCamera()
             local candidate, radius = FindBestCandidate()
+
+            -- Store current target for silent aim hook
+            currentTarget = candidate
+
+            -- Update UI
             UpdateUI(candidate, radius)
+
+            if not candidate or not camera then
+                return
+            end
+
+            -- Execute aiming based on mode
+            local shouldAim = ShouldAim(settings)
+            if not shouldAim then
+                return
+            end
+
+            if settings.aimMode == "Normal" then
+                -- Normal mode: smooth camera aim
+                ExecuteNormalAim(candidate, camera, settings)
+            elseif settings.aimMode == "Silent" then
+                if silentHookInstalled then
+                    -- Silent aim via hook already handles raycast redirection
+                    -- Optionally move camera slightly for visual feedback
+                    if settings.smooth > 0 then
+                        ExecuteNormalAim(candidate, camera, settings)
+                    end
+                else
+                    -- Fallback: camera snap (less stealthy)
+                    ExecuteNormalAim(candidate, camera, settings)
+                end
+            elseif settings.blatant then
+                -- Blatant: aggressive aim with hook
+                ExecuteNormalAim(candidate, camera, settings)
+            end
+
+            -- Triggerbot
+            if settings.aimMode == "Silent" or settings.blatant then
+                ExecuteTriggerbot(candidate, tick())
+            end
         end, debug.traceback)
 
         if not ok and not errorReported then
             errorReported = true
-            warn("[AimDiagnostics] update failed: " .. tostring(err))
+            warn("[AimBot] update failed: " .. tostring(err))
         end
     end)
+
+    -- Store input connection for cleanup
+    AimBot._inputConnection = inputConnection
 end
 
 function AimBot.Stop()
     active = false
+    currentTarget = nil
 
     if connection then
         connection:Disconnect()
         connection = nil
+    end
+
+    if AimBot._inputConnection then
+        AimBot._inputConnection:Disconnect()
+        AimBot._inputConnection = nil
     end
 
     HideUI()
@@ -460,6 +906,13 @@ function AimBot.Stop()
         ui.marker = nil
         ui.label = nil
         ui.status = nil
+    end
+
+    if ui.tracer then
+        pcall(function()
+            ui.tracer:Remove()
+        end)
+        ui.tracer = nil
     end
 end
 
