@@ -89,6 +89,15 @@ local function LerpAngle(a, b, t)
     return a + diff * t
 end
 
+-- Wrap an angle into (-pi, pi] so corrections always take the shortest path
+local function WrapAngle(angle)
+    angle = angle % (2 * math.pi)
+    if angle > math.pi then
+        angle = angle - 2 * math.pi
+    end
+    return angle
+end
+
 local function VectorLerp(a, b, t)
     return Vector3.new(
         Lerp(a.X, b.X, t),
@@ -519,11 +528,10 @@ end
 
 -- Aim execution ----------------------------------------------------------------
 
--- Normal aim: mouse-point camera rotation with distance-aware speed/smooth.
--- When the target is far from the mouse cursor on screen (near FOV edge):
---   use Speed → fast convergence to acquire.
--- When the target is close to the mouse cursor:
---   use Smooth → gentle visible movement for fine adjustment.
+-- Normal aim: MOUSE-POINTER lock (first- AND third-person).
+-- Rotates the camera so the enemy stays exactly UNDER THE MOUSE CURSOR on
+-- screen. When far from the cursor: Speed (fast convergence to acquire).
+-- When close to the cursor: Smooth (gentle fine-tuning).
 local function ExecuteNormalAim(candidate, camera, settings, deltaTime, radius)
     local targetPos = candidate.predictedPosition or candidate.part.Position
     local spread = settings.missSpread
@@ -540,18 +548,35 @@ local function ExecuteNormalAim(candidate, camera, settings, deltaTime, radius)
         return
     end
 
-    -- Distance from the target to the screen CENTER decides speed vs smooth:
-    --   Far from center (near FOV edge) -> speed (fast acquisition)
-    --   Close to center -> smooth (gentle fine-tuning)
-    local screen, onScreen = camera:WorldToViewportPoint(targetPos)
-    local center = viewport * 0.5
-    local targetCenterDist = onScreen
-        and (Vector2.new(screen.X, screen.Y) - center).Magnitude
-        or math.huge
+    -- Real 3D directions: toward the enemy, and through the mouse cursor
+    local origin = camera.CFrame.Position
+    local targetDir = (targetPos - origin).Unit
+    local mousePos = GetMousePosition()
+    local mouseRay = camera:ViewportPointToRay(mousePos.X, mousePos.Y)
+    local mouseDir = mouseRay.Direction
+
+    -- Express both directions in the camera's local space (right, up, forward)
+    local right, up, look = camera.CFrame.RightVector, camera.CFrame.UpVector, camera.CFrame.LookVector
+    local ltX, ltY, ltZ = targetDir:Dot(right), targetDir:Dot(up), targetDir:Dot(look)
+    local lmX, lmY, lmZ = mouseDir:Dot(right), mouseDir:Dot(up), mouseDir:Dot(look)
+
+    -- Angular gap between the mouse ray and the enemy ray
+    local targetYaw = math.atan2(ltX, ltZ)
+    local mouseYaw = math.atan2(lmX, lmZ)
+    local targetPitch = math.atan2(ltY, math.sqrt(ltX * ltX + ltZ * ltZ))
+    local mousePitch = math.atan2(lmY, math.sqrt(lmX * lmX + lmZ * lmZ))
+
+    -- Correction angles (shortest path). Fixed point: enemy under the cursor.
+    local yawOffset = WrapAngle(mouseYaw - targetYaw)
+    local pitchOffset = WrapAngle(targetPitch - mousePitch)
+
+    -- Angular distance (in radians) drives the speed/smooth transition
+    local angDist = math.sqrt(yawOffset * yawOffset + pitchOffset * pitchOffset)
+    local fovRad = math.rad(camera.FieldOfView)
+    local threshold = (radius or 50) * 0.35 * (fovRad / math.max(viewport.Y, 1))
 
     local factor
-    local threshold = (radius or 50) * 0.35 -- 35% of FOV radius = transition point
-    if targetCenterDist >= threshold then
+    if angDist >= threshold then
         -- Speed: fast convergence, higher speed = faster
         local spd = Clamp(settings.aimSpeed, 0, 1)
         factor = spd >= 1 and 1 or (1 - math.exp(-spd * 14 * (deltaTime or 0.016)))
@@ -563,11 +588,11 @@ local function ExecuteNormalAim(candidate, camera, settings, deltaTime, radius)
     end
     factor = Clamp(factor, 0, 1)
 
-    -- Lock: rotate the camera so the target settles at the crosshair center.
-    -- Every frame we recompute the exact look-at CFrame and interpolate toward
-    -- it, so the aim can never drift or spin — it converges and holds.
-    local lookCF = CFrame.lookAt(camera.CFrame.Position, targetPos)
-    camera.CFrame = camera.CFrame:Lerp(lookCF, factor)
+    -- Rotate the camera by that fraction of the correction each frame.
+    -- The correction is the exact angle between the mouse ray and the enemy
+    -- ray, so it converges exactly when the enemy sits under the cursor and
+    -- follows the cursor when the player moves the mouse while aiming.
+    camera.CFrame = camera.CFrame * CFrame.Angles(pitchOffset * factor, yawOffset * factor, 0)
 end
 
 -- Silent aim: install metamethod hook on Raycast to redirect hits
@@ -675,6 +700,7 @@ end
 local ui = {
     gui = nil,
     fov = nil,
+    fovCircle = nil,
     marker = nil,
     label = nil,
     status = nil,
@@ -734,17 +760,31 @@ local function CreateUI()
     gui.Parent = CoreGui
     ui.gui = gui
 
-    -- FOV circle
-    local fov = CreateFrame(gui, Color3.fromRGB(255, 90, 90), 0.75)
-    fov.Name = "FOV"
-    fov.BackgroundTransparency = 1
-    fov.BorderSizePixel = 2
-    fov.BorderColor3 = Color3.fromRGB(255, 90, 90)
-    fov.Visible = false
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(1, 0)
-    corner.Parent = fov
-    ui.fov = fov
+    -- FOV circle: Drawing.Circle overlay (primary, always renders on top),
+    -- with a UI Frame fallback when the executor has no Drawing API.
+    local circleOk, circle = pcall(function()
+        return Drawing.new("Circle")
+    end)
+    if circleOk and typeof(circle) == "userdata" then
+        circle.Thickness = 2
+        circle.Color = Color3.fromRGB(255, 90, 90)
+        circle.Transparency = 0
+        circle.Visible = false
+        circle.Radius = 100
+        circle.Position = Vector2.new(0, 0)
+        ui.fovCircle = circle
+    else
+        local fov = CreateFrame(gui, Color3.fromRGB(255, 90, 90), 0.75)
+        fov.Name = "FOV"
+        fov.BackgroundTransparency = 1
+        fov.BorderSizePixel = 2
+        fov.BorderColor3 = Color3.fromRGB(255, 90, 90)
+        fov.Visible = false
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(1, 0)
+        corner.Parent = fov
+        ui.fov = fov
+    end
 
     -- Target marker
     local marker = CreateFrame(gui, Color3.fromRGB(70, 255, 120), 0.05)
@@ -818,6 +858,7 @@ local function CreateUI()
 end
 
 local function HideUI()
+    if ui.fovCircle then ui.fovCircle.Visible = false end
     if ui.fov then ui.fov.Visible = false end
     if ui.marker then ui.marker.Visible = false end
     if ui.label then ui.label.Visible = false end
@@ -843,11 +884,18 @@ local function UpdateUI(candidate, radius)
     local toggleBind = GetToggleKeyBind()
     local toggleState = toggleBind and toggleBind.active == true
 
-    -- FOV circle
-    ui.fov.Position = UDim2.fromOffset(mousePosition.X - radius, mousePosition.Y - radius)
-    ui.fov.Size = UDim2.fromOffset(diameter, diameter)
-    ui.fov.Visible = IsAimbotEnabled() and settings.fovDraw
-    ui.fov.BorderColor3 = fovColor
+    -- FOV circle (centered on the mouse cursor)
+    if ui.fovCircle then
+        ui.fovCircle.Position = mousePosition
+        ui.fovCircle.Radius = math.max(radius, 1)
+        ui.fovCircle.Color = fovColor
+        ui.fovCircle.Visible = IsAimbotEnabled() and settings.fovDraw
+    elseif ui.fov then
+        ui.fov.Position = UDim2.fromOffset(mousePosition.X - radius, mousePosition.Y - radius)
+        ui.fov.Size = UDim2.fromOffset(diameter, diameter)
+        ui.fov.Visible = IsAimbotEnabled() and settings.fovDraw
+        ui.fov.BorderColor3 = fovColor
+    end
 
     if not candidate then
         ui.marker.Visible = false
@@ -1082,6 +1130,13 @@ function AimBot.Stop()
         ui.marker = nil
         ui.label = nil
         ui.status = nil
+    end
+
+    if ui.fovCircle then
+        pcall(function()
+            ui.fovCircle:Remove()
+        end)
+        ui.fovCircle = nil
     end
 
     if ui.tracer then
