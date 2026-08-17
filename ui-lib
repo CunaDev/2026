@@ -75,6 +75,7 @@ getgenv().loaded = true
         },
         flags = {},
         config_flags = {},
+        keybind_list = {},
 
         connections = {},   
         notifications = {},
@@ -817,6 +818,33 @@ getgenv().loaded = true
             end)
         end
         library.notifications = notifications
+
+        function library:Hide()
+            if library.gui then
+                library.gui.Enabled = false
+            end
+        end
+
+        function library:Show()
+            if library.gui then
+                library.gui.Enabled = true
+            end
+        end
+
+        function library:ToggleWindow()
+            if library.gui then
+                library.gui.Enabled = not library.gui.Enabled
+            end
+        end
+
+        function library:update_keybind_list()
+            for flag, kb in library.keybind_list do
+                if kb and kb.set then
+                    local state = kb.active or false
+                    kb.set(state)
+                end
+            end
+        end
 
         function library:watermark(options)
             local cfg = {
@@ -2435,6 +2463,9 @@ getgenv().loaded = true
 
                 config_flags[cfg.flag] = cfg.set
                 cfg.set({mode = cfg.mode, active = cfg.active, key = cfg.key})
+
+                -- Register in keybind_list for batch operations
+                library.keybind_list[cfg.flag] = cfg
 
                 return setmetatable(cfg, library)
             end
