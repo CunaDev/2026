@@ -700,6 +700,7 @@ end
 local ui = {
     gui = nil,
     fov = nil,
+    fovCircle = nil,
     fovLines = nil,
     marker = nil,
     label = nil,
@@ -734,17 +735,43 @@ end
 
 local function SetupDrawingTracer()
     -- Try to use Drawing library for line rendering (better performance)
-    local ok, drawing = pcall(function()
-        return Drawing.new("Line")
+    -- Resolve the library the same way the Open Aimbot reference does:
+    -- getfenv().Drawing works on more executors than the plain global.
+    local drawing = GetDrawingLib()
+    if not drawing then
+        return false
+    end
+    local ok, line = pcall(function()
+        return drawing.new("Line")
     end)
-    if ok and drawing then
-        ui.tracer = drawing
+    if ok and line ~= nil then
+        ui.tracer = line
         ui.tracer.Thickness = 1.5
         ui.tracer.Transparency = 0.6
+        ui.tracer.Color = Color3.fromRGB(255, 90, 90)
+        ui.tracer.ZIndex = 2
         ui.tracer.Visible = false
         return true
     end
     return false
+end
+
+-- Resolve the executor's Drawing library.
+-- Mirrors the Open Aimbot reference: getfenv() is the executor's environment, so
+-- getfenv().Drawing reaches the library on executors where the plain global is
+-- shadowed. Falls back to the plain global for Luau-compatible environments.
+local function GetDrawingLib()
+    local lib = nil
+    if type(getfenv) == "function" then
+        local ok, env = pcall(getfenv)
+        if ok and type(env) == "table" then
+            lib = env.Drawing
+        end
+    end
+    if lib == nil then
+        lib = Drawing
+    end
+    return lib
 end
 
 local function CreateUI()
@@ -760,36 +787,63 @@ local function CreateUI()
     gui.Parent = CoreGui
     ui.gui = gui
 
-    -- FOV circle: 48 Drawing.Line segments form a ring (works on every executor
-    -- that supports Drawing). If Drawing is unavailable, a UI Frame fallback is used.
-    local lineCount = 48
-    local lines = {}
-    local drawingWorks = false
-    for i = 1, lineCount do
-        local ok, line = pcall(function()
-            local l = Drawing.new("Line")
-            l.Thickness = 2
-            l.Color = Color3.fromRGB(255, 90, 90)
-            l.Transparency = 0
-            l.Visible = false
-            l.ZIndex = 999
-            return l
+    -- FOV circle: multi-tier approach matching the proven Open Aimbot reference.
+    -- Tier 1 — Drawing.Circle via getfenv().Drawing (reference style: ZIndex=4,
+    --           NumSides=1000, Filled=false, Transparency=0 for fully opaque).
+    -- Tier 2 — 48 Drawing.Line segments (universal Drawing fallback).
+    -- Tier 3 — UI Frame with UICorner (last resort).
+    local drawing = GetDrawingLib()
+    local fovCreated = false
+    if drawing and drawing.new then
+        local ok, circle = pcall(function()
+            local c = drawing.new("Circle")
+            c.Visible = false
+            c.ZIndex = 4
+            c.NumSides = 1000
+            c.Radius = 100
+            c.Thickness = 2
+            c.Transparency = 0
+            c.Filled = false
+            c.Color = Color3.fromRGB(255, 90, 90)
+            return c
         end)
-        if ok and line ~= nil then
-            table.insert(lines, line)
-        else
-            -- Clean up any partial lines
-            for _, l in ipairs(lines) do
-                pcall(function() l:Remove() end)
-            end
-            lines = nil
-            break
+        if ok and circle ~= nil then
+            ui.fovCircle = circle
+            fovCreated = true
         end
     end
-    if lines then
-        ui.fovLines = lines
-    else
-        -- Frame fallback
+    if not fovCreated then
+        -- Tier 2: Line segments
+        local lineCount = 48
+        local lines = {}
+        for i = 1, lineCount do
+            local ok, line = pcall(function()
+                local l = drawing.new("Line")
+                l.Thickness = 2
+                l.Color = Color3.fromRGB(255, 90, 90)
+                l.Transparency = 0
+                l.Visible = false
+                l.ZIndex = 999
+                return l
+            end)
+            if ok and line ~= nil then
+                table.insert(lines, line)
+            else
+                -- Clean up any partial lines
+                for _, l in ipairs(lines) do
+                    pcall(function() l:Remove() end)
+                end
+                lines = nil
+                break
+            end
+        end
+        if lines then
+            ui.fovLines = lines
+            fovCreated = true
+        end
+    end
+    if not fovCreated then
+        -- Tier 3: Frame fallback
         local fov = CreateFrame(gui, Color3.fromRGB(255, 90, 90), 0.75)
         fov.Name = "FOV"
         fov.BackgroundTransparency = 1
@@ -875,6 +929,7 @@ local function CreateUI()
 end
 
 local function HideUI()
+    if ui.fovCircle then ui.fovCircle.Visible = false end
     if ui.fovLines then
         for _, line in ipairs(ui.fovLines) do
             line.Visible = false
@@ -905,9 +960,23 @@ local function UpdateUI(candidate, radius)
     local toggleBind = GetToggleKeyBind()
     local toggleState = toggleBind and toggleBind.active == true
 
-    -- FOV circle (centered on the mouse cursor, drawn as line segments)
+    -- FOV circle (centered on the mouse cursor)
     local fovVisible = IsAimbotEnabled() and settings.fovDraw
-    if ui.fovLines then
+    if ui.fovCircle then
+        -- Tier 1: Drawing.Circle — exact Open Aimbot reference style.
+        -- Every frame we update all properties to match the reference's
+        -- VisualizeFoV() pattern.
+        ui.fovCircle.Position = Vector2.new(mousePosition.X, mousePosition.Y)
+        ui.fovCircle.Radius = math.max(radius, 1)
+        ui.fovCircle.Thickness = 2
+        ui.fovCircle.Transparency = 0
+        ui.fovCircle.Filled = false
+        ui.fovCircle.Color = fovColor
+        ui.fovCircle.ZIndex = 4
+        ui.fovCircle.NumSides = 1000
+        ui.fovCircle.Visible = fovVisible
+    elseif ui.fovLines then
+        -- Tier 2: 48 Drawing.Line segments
         local segments = #ui.fovLines
         local r = math.max(radius, 1)
         for i = 1, segments do
@@ -926,6 +995,7 @@ local function UpdateUI(candidate, radius)
             line.Visible = fovVisible
         end
     elseif ui.fov then
+        -- Tier 3: Frame fallback
         ui.fov.Position = UDim2.fromOffset(mousePosition.X - radius, mousePosition.Y - radius)
         ui.fov.Size = UDim2.fromOffset(diameter, diameter)
         ui.fov.Visible = IsAimbotEnabled() and settings.fovDraw
@@ -1165,6 +1235,13 @@ function AimBot.Stop()
         ui.marker = nil
         ui.label = nil
         ui.status = nil
+    end
+
+    if ui.fovCircle then
+        pcall(function()
+            ui.fovCircle:Remove()
+        end)
+        ui.fovCircle = nil
     end
 
     if ui.fovLines then
