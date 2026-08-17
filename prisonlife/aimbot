@@ -15,7 +15,6 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local CoreGui = game:GetService("CoreGui")
 local Workspace = game:GetService("Workspace")
-local VirtualInputManager = game:GetService("VirtualInputManager")
 local LocalPlayer = Players.LocalPlayer
 
 local function GetEnvironment()
@@ -529,7 +528,6 @@ local function ExecuteNormalAim(candidate, camera, settings, deltaTime, radius)
     local targetPos = candidate.predictedPosition or candidate.part.Position
     local spread = settings.missSpread
     local distance = candidate.distance
-    local screenDist = candidate.screenDistance
 
     -- Apply miss spread by displacing the aim point in world space
     if spread > 0 then
@@ -537,57 +535,39 @@ local function ExecuteNormalAim(candidate, camera, settings, deltaTime, radius)
         targetPos = camera.CFrame.Position + ApplyMissSpread(dir, spread, distance) * distance
     end
 
-    local mousePos = GetMousePosition()
     local viewport = camera.ViewportSize
     if viewport.X <= 0 or viewport.Y <= 0 then
         return
     end
 
-    -- Compute per-frame factor based on screen distance from mouse cursor:
-    --   Far from mouse (near FOV edge) → speed-based (fast, settings.aimSpeed 0..1)
-    --   Close to mouse → smooth-based (gentle, settings.smooth 0..10)
+    -- Distance from the target to the screen CENTER decides speed vs smooth:
+    --   Far from center (near FOV edge) -> speed (fast acquisition)
+    --   Close to center -> smooth (gentle fine-tuning)
+    local screen, onScreen = camera:WorldToViewportPoint(targetPos)
+    local center = viewport * 0.5
+    local targetCenterDist = onScreen
+        and (Vector2.new(screen.X, screen.Y) - center).Magnitude
+        or math.huge
+
     local factor
-    local threshold = (radius or 50) * 0.25 -- 25% of FOV radius = transition point
-    if screenDist >= threshold then
+    local threshold = (radius or 50) * 0.35 -- 35% of FOV radius = transition point
+    if targetCenterDist >= threshold then
         -- Speed: fast convergence, higher speed = faster
         local spd = Clamp(settings.aimSpeed, 0, 1)
         factor = spd >= 1 and 1 or (1 - math.exp(-spd * 14 * (deltaTime or 0.016)))
     else
-        -- Smooth: gentle movement, higher smooth = slower/smoother
+        -- Smooth: gentle movement, higher smooth = smoother/slower
         local sm = Clamp(settings.smooth, 0, 10)
         local k = 40 / (sm + 1) -- smooth 0 → k=40 (snap), smooth 10 → k≈3.6 (gentle)
         factor = 1 - math.exp(-k * (deltaTime or 0.016))
     end
     factor = Clamp(factor, 0, 1)
 
-    -- Project the target to screen space and measure the gap to the mouse
-    local screen, onScreen = camera:WorldToViewportPoint(targetPos)
-    if not onScreen then
-        -- Target off-screen: fall back to rotating straight toward it
-        local direction = (targetPos - camera.CFrame.Position).Unit
-        local lookCF = CFrame.lookAt(camera.CFrame.Position, camera.CFrame.Position + direction * 1000)
-        camera.CFrame = camera.CFrame:Lerp(lookCF, factor)
-        return
-    end
-
-    local dx = mousePos.X - screen.X
-    local dy = mousePos.Y - screen.Y
-
-    -- Pixel distance -> angular offset using the vertical FOV scaled by aspect ratio
-    local fovRad = math.rad(camera.FieldOfView)
-    local scaleY = fovRad / viewport.Y
-    local scaleX = fovRad / viewport.X
-
-    -- Rotate locally: negative yaw turns right, positive pitch looks down
-    local yawRot = dx * scaleX * factor
-    local pitchRot = -dy * scaleY * factor
-
-    -- Clamp per-frame step to avoid violent single-frame flicks
-    local maxStep = math.rad(40)
-    yawRot = Clamp(yawRot, -maxStep, maxStep)
-    pitchRot = Clamp(pitchRot, -maxStep, maxStep)
-
-    camera.CFrame = camera.CFrame * CFrame.Angles(pitchRot, yawRot, 0)
+    -- Lock: rotate the camera so the target settles at the crosshair center.
+    -- Every frame we recompute the exact look-at CFrame and interpolate toward
+    -- it, so the aim can never drift or spin — it converges and holds.
+    local lookCF = CFrame.lookAt(camera.CFrame.Position, targetPos)
+    camera.CFrame = camera.CFrame:Lerp(lookCF, factor)
 end
 
 -- Silent aim: install metamethod hook on Raycast to redirect hits
