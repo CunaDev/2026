@@ -295,7 +295,7 @@ end
 local function IsMouseOverGui()
     local library = Environment.library
     local menuGui = library and library.gui
-    if not menuGui or not menuGui:IsA() then
+    if not menuGui or not menuGui:IsA("ScreenGui") then
         return false
     end
 
