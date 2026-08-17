@@ -700,7 +700,7 @@ end
 local ui = {
     gui = nil,
     fov = nil,
-    fovCircle = nil,
+    fovLines = nil,
     marker = nil,
     label = nil,
     status = nil,
@@ -760,26 +760,43 @@ local function CreateUI()
     gui.Parent = CoreGui
     ui.gui = gui
 
-    -- FOV circle: Drawing.Circle overlay (primary, always renders on top),
-    -- with a UI Frame fallback when the executor has no Drawing API.
-    local circleOk, circle = pcall(function()
-        return Drawing.new("Circle")
-    end)
-    if circleOk and typeof(circle) == "userdata" then
-        circle.Thickness = 2
-        circle.Color = Color3.fromRGB(255, 90, 90)
-        circle.Transparency = 0
-        circle.Visible = false
-        circle.Radius = 100
-        circle.Position = Vector2.new(0, 0)
-        ui.fovCircle = circle
+    -- FOV circle: 48 Drawing.Line segments form a ring (works on every executor
+    -- that supports Drawing). If Drawing is unavailable, a UI Frame fallback is used.
+    local lineCount = 48
+    local lines = {}
+    local drawingWorks = false
+    for i = 1, lineCount do
+        local ok, line = pcall(function()
+            local l = Drawing.new("Line")
+            l.Thickness = 2
+            l.Color = Color3.fromRGB(255, 90, 90)
+            l.Transparency = 0
+            l.Visible = false
+            l.ZIndex = 999
+            return l
+        end)
+        if ok and line ~= nil then
+            table.insert(lines, line)
+        else
+            -- Clean up any partial lines
+            for _, l in ipairs(lines) do
+                pcall(function() l:Remove() end)
+            end
+            lines = nil
+            break
+        end
+    end
+    if lines then
+        ui.fovLines = lines
     else
+        -- Frame fallback
         local fov = CreateFrame(gui, Color3.fromRGB(255, 90, 90), 0.75)
         fov.Name = "FOV"
         fov.BackgroundTransparency = 1
         fov.BorderSizePixel = 2
         fov.BorderColor3 = Color3.fromRGB(255, 90, 90)
         fov.Visible = false
+        fov.ZIndex = 1
         local corner = Instance.new("UICorner")
         corner.CornerRadius = UDim.new(1, 0)
         corner.Parent = fov
@@ -858,7 +875,11 @@ local function CreateUI()
 end
 
 local function HideUI()
-    if ui.fovCircle then ui.fovCircle.Visible = false end
+    if ui.fovLines then
+        for _, line in ipairs(ui.fovLines) do
+            line.Visible = false
+        end
+    end
     if ui.fov then ui.fov.Visible = false end
     if ui.marker then ui.marker.Visible = false end
     if ui.label then ui.label.Visible = false end
@@ -884,12 +905,26 @@ local function UpdateUI(candidate, radius)
     local toggleBind = GetToggleKeyBind()
     local toggleState = toggleBind and toggleBind.active == true
 
-    -- FOV circle (centered on the mouse cursor)
-    if ui.fovCircle then
-        ui.fovCircle.Position = mousePosition
-        ui.fovCircle.Radius = math.max(radius, 1)
-        ui.fovCircle.Color = fovColor
-        ui.fovCircle.Visible = IsAimbotEnabled() and settings.fovDraw
+    -- FOV circle (centered on the mouse cursor, drawn as line segments)
+    local fovVisible = IsAimbotEnabled() and settings.fovDraw
+    if ui.fovLines then
+        local segments = #ui.fovLines
+        local r = math.max(radius, 1)
+        for i = 1, segments do
+            local a1 = (i - 1) / segments * 2 * math.pi
+            local a2 = i / segments * 2 * math.pi
+            local line = ui.fovLines[i]
+            line.From = Vector2.new(
+                mousePosition.X + math.cos(a1) * r,
+                mousePosition.Y + math.sin(a1) * r
+            )
+            line.To = Vector2.new(
+                mousePosition.X + math.cos(a2) * r,
+                mousePosition.Y + math.sin(a2) * r
+            )
+            line.Color = fovColor
+            line.Visible = fovVisible
+        end
     elseif ui.fov then
         ui.fov.Position = UDim2.fromOffset(mousePosition.X - radius, mousePosition.Y - radius)
         ui.fov.Size = UDim2.fromOffset(diameter, diameter)
@@ -1132,11 +1167,13 @@ function AimBot.Stop()
         ui.status = nil
     end
 
-    if ui.fovCircle then
-        pcall(function()
-            ui.fovCircle:Remove()
-        end)
-        ui.fovCircle = nil
+    if ui.fovLines then
+        for _, line in ipairs(ui.fovLines) do
+            pcall(function()
+                line:Remove()
+            end)
+        end
+        ui.fovLines = nil
     end
 
     if ui.tracer then
